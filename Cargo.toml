@@ -1,0 +1,3 @@
+[workspace]
+resolver = "3"
+members = ["client", "entry-node", "exit-node", "middle-node","proxy"]
