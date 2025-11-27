@@ -1,0 +1,68 @@
+@startuml tor-deployment
+
+skinparam node {
+    BackgroundColor #ECF0F1
+    BorderColor #3498DB
+    BorderThickness 2
+}
+skinparam artifact {
+    BackgroundColor #D5F5E3
+    BorderColor #27AE60
+}
+skinparam database {
+    BackgroundColor #FEF9E7
+    BorderColor #F1C40F
+}
+skinparam cloud {
+    BackgroundColor #E8F8F5
+    BorderColor #1ABC9C
+}
+
+title Deployment Diagram
+
+node "User Machine" as UserMachine {
+    artifact "Browser" as Browser
+}
+
+cloud "Docker Network" as DockerNet {
+
+    node "Directory Container" as DirContainer {
+        artifact "Directory Service" as DirService
+        database "Node Registry" as Registry
+        DirService -- Registry
+    }
+
+    node "Client Container" as ClientContainer {
+        artifact "Tor Client" as TorClient
+    }
+
+    node "Entry Container" as EntryContainer {
+        artifact "Entry Node" as EntryService
+    }
+
+    node "Middle Container" as MiddleContainer {
+        artifact "Middle Node" as MiddleService
+    }
+
+    node "Exit Container" as ExitContainer {
+        artifact "Exit Node" as ExitService
+    }
+}
+
+cloud "Internet" as Internet {
+    artifact "Website" as Website
+}
+
+UserMachine --> ClientContainer
+
+ClientContainer ..> DirContainer
+EntryContainer ..> DirContainer
+MiddleContainer ..> DirContainer
+ExitContainer ..> DirContainer
+
+ClientContainer --> EntryContainer
+EntryContainer --> MiddleContainer
+MiddleContainer --> ExitContainer
+ExitContainer --> Internet
+
+@enduml

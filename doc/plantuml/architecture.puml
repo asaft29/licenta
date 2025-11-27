@@ -1,0 +1,91 @@
+@startuml tor-component-architecture
+
+left to right direction
+
+!define RECTANGLE class
+
+skinparam componentStyle rectangle
+skinparam backgroundColor #FEFEFE
+skinparam component {
+    BackgroundColor<<browser>> #FFCCCC
+    BorderColor<<browser>> #E74C3C
+    BackgroundColor<<client>> #CCFFCC
+    BorderColor<<client>> #2ECC71
+    BackgroundColor<<directory>> #FFE5CC
+    BorderColor<<directory>> #F39C12
+    BackgroundColor<<node>> #E5CCFF
+    BorderColor<<node>> #9B59B6
+    BackgroundColor<<web>> #E5E5E5
+    BorderColor<<web>> #34495E
+}
+
+title Component Architecture
+
+package "User Environment" {
+    [Browser] as Browser <<browser>>
+}
+
+package "Tor Client" {
+    [Tor Client] as Client <<client>>
+
+    component "Client Internals" {
+        [SOCKS5 Server] as SOCKS5
+        [Stream Manager] as StreamMgr
+        [Circuit Manager] as CircuitMgr
+        [Onion Encryptor] as Onion
+        [Directory Client] as DirClient
+    }
+}
+
+package "Directory Service" {
+    [Directory Server] as Directory <<directory>>
+    database "Node Registry" as Registry
+    Directory --> Registry
+}
+
+package "Relay Network" {
+    [Entry Node] as Entry <<node>>
+    [Middle Node] as Middle <<node>>
+    [Exit Node] as Exit <<node>>
+}
+
+package "Internet" {
+    [Website] as Web <<web>>
+}
+
+Browser --> SOCKS5 : "SOCKS5 request"
+SOCKS5 --> StreamMgr : "New connection"
+StreamMgr --> CircuitMgr : "Stream ID + destination"
+CircuitMgr --> DirClient
+CircuitMgr --> Onion : "Encrypt"
+
+SOCKS5 <-- StreamMgr : "Routed data"
+StreamMgr <-- CircuitMgr : "Stream ID + data"
+CircuitMgr <-- Onion : "Decrypted"
+
+DirClient .[#gray]..> Directory : "Query nodes"
+Entry .[#gray]..> Directory : "Register"
+Middle .[#gray]..> Directory : "Register"
+Exit .[#gray]..> Directory : "Register"
+
+Onion --> Entry : "[E(E(E(data)))]"
+Entry --> Middle : "[E(E(data))]"
+Middle --> Exit : "[E(data)]"
+Exit --> Web : "data"
+
+Onion <-- Entry : "[E(E(E(response)))]"
+Entry <-- Middle : "[E(E(response))]"
+Middle <-- Exit : "[E(response)]"
+Exit <-- Web : "response"
+
+Browser <-- SOCKS5 : "HTTP response"
+
+legend right
+  |= Notation |= Meaning |
+  | E(data) | Encrypted data |
+  | data | Plaintext (no encryption) |
+  | → | Forward path (request) |
+  | ← | Return path (response) |
+endlegend
+
+@enduml

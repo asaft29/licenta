@@ -1,0 +1,94 @@
+@startuml tor-request-flow
+
+skinparam sequence {
+    ArrowColor #3498DB
+    ActorBorderColor #2C3E50
+    LifeLineBorderColor #BDC3C7
+}
+
+title User Request Flow
+
+actor Browser
+participant "Tor Client Service" as Client #2ECC71
+participant "Directory\nService" as Directory #F39C12
+participant "Onion\nEncryptor" as Crypto #E74C3C
+participant "Entry Node Service" as Entry #8E44AD
+participant "Middle Node Service" as Middle #9B59B6
+participant "Exit Node Service" as Exit #A569BD
+participant "Website" as Web #1ABC9C
+
+== Node Discovery ==
+
+Browser -> Client: SOCKS5 CONNECT\nexample.com:443
+activate Browser
+activate Client
+
+Client -> Directory: GET /nodes
+activate Directory
+Directory --> Client: Available nodes list
+deactivate Directory
+
+Client -> Client: Select path:\nEntry → Middle → Exit
+
+== Request Phase ==
+
+Client -> Crypto: Encrypt data in 3 layers
+activate Crypto
+note right of Crypto
+  Layer 1: Exit key
+  Layer 2: Middle key
+  Layer 3: Entry key
+end note
+Crypto --> Client: Triple encrypted data
+deactivate Crypto
+
+Client -> Entry: TCP Send\n[E(E(E(data)))]
+activate Entry
+
+Entry -> Entry: Decrypt outer layer
+note right: Result: [E(E(data))]
+
+Entry -> Middle: TCP Forward\n[E(E(data))]
+activate Middle
+
+Middle -> Middle: Decrypt middle layer
+note right: Result: [E(data)]
+
+Middle -> Exit: TCP Forward\n[E(data)]
+activate Exit
+
+Exit -> Exit: Decrypt final layer
+note right: Result: Plaintext
+
+Exit -> Web: HTTP Request\nGET / HTTP/1.1
+activate Web
+
+Web --> Exit: HTTP Response\n200 OK + HTML
+deactivate Web
+
+== Response Phase ==
+
+Exit -> Exit: Encrypt with exit_key
+Exit -> Middle: TCP Send\n[E(response)]
+deactivate Exit
+
+Middle -> Middle: Encrypt with middle_key
+Middle -> Entry: TCP Send\n[E(E(response))]
+deactivate Middle
+
+Entry -> Entry: Encrypt with entry_key
+Entry -> Client: TCP Send\n[E(E(E(response)))]
+deactivate Entry
+
+Client -> Crypto: Decrypt all 3 layers
+activate Crypto
+Crypto --> Client: Plaintext response
+deactivate Crypto
+
+Client --> Browser: SOCKS5 Response\nHTML content
+deactivate Client
+
+Browser -> Browser: Render page
+deactivate Browser
+
+@enduml

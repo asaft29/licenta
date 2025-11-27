@@ -1,0 +1,578 @@
+@startuml tor-class-diagram-beautiful
+!pragma PLANTUML_LIMIT_SIZE 8192
+!theme toy
+skinparam backgroundColor #F8F9FA
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+
+skinparam package {
+    BackgroundColor<<library>> #FFE5E5
+    BorderColor<<library>> #E74C3C
+    FontColor<<library>> #C0392B
+    
+    BackgroundColor<<client>> #E8F8F5
+    BorderColor<<client>> #16A085
+    FontColor<<client>> #0E6655
+    
+    BackgroundColor<<directory>> #FFF3E0
+    BorderColor<<directory>> #F39C12
+    FontColor<<directory>> #D68910
+    
+    BackgroundColor<<relay>> #F3E5F5
+    BorderColor<<relay>> #8E44AD
+    FontColor<<relay>> #6C3483
+}
+
+skinparam class {
+    BackgroundColor<<library>> #FADBD8
+    BorderColor<<library>> #E74C3C
+    
+    BackgroundColor<<client>> #D1F2EB
+    BorderColor<<client>> #16A085
+    
+    BackgroundColor<<directory>> #FDEBD0
+    BorderColor<<directory>> #F39C12
+    
+    BackgroundColor<<relay>> #EBDEF0
+    BorderColor<<relay>> #8E44AD
+    
+    BackgroundColor<<shared>> #D6EAF8
+    BorderColor<<shared>> #3498DB
+    
+    BackgroundColor<<protocol>> #FCF3CF
+    BorderColor<<protocol>> #F4D03F
+    
+    ArrowColor #34495E
+    BorderThickness 2
+}
+
+title **Class Diagram**
+
+legend top left
+|= **Color Legend** |
+|<back:#FADBD8>   </back> External Library (simple_socks5) |
+|<back:#D1F2EB>   </back> Tor Client Service |
+|<back:#FDEBD0>   </back> Directory Service |
+|<back:#EBDEF0>   </back> Relay Node Service |
+|<back:#D6EAF8>   </back> Shared Types |
+|<back:#FCF3CF>   </back> Protocol/Message |
+endlegend
+
+
+package "simple_socks5\n**[External Library]**" <<library>> {
+    
+    class Socks5 <<library>> {
+        **- Fields:**
+        - bind_addr: SocketAddr
+        - auth_methods: Vec<AuthMethod>
+        ==
+        **+ Public Methods:**
+        + new(addr: &str) -> Self
+        + bind(addr: &str) -> Result<Self>
+        + allow_no_auth()
+        + allow_user_pass(u: String, p: String)
+        + **accept() -> Result<TcpStream>**
+        + **authenticate(stream) -> Result<()>**
+        + **read_conn_request(stream) -> Result<ConnRequest>**
+        + send_conn_reply(stream, reply) -> Result<()>
+    }
+    
+    class ConnRequest <<library>> {
+        + cmd: Command
+        + atyp: ATYP
+        + dst: Destination
+    }
+    
+    enum Command <<library>> {
+        **Connect**
+        Bind
+        UdpAssociate
+    }
+    
+    class Destination <<library>> {
+        + address: String
+        + port: u16
+    }
+    
+    Socks5 ..> ConnRequest
+    ConnRequest --> Command
+    ConnRequest --> Destination
+}
+
+package "Tor Client Service\n**[Binary: tor-client, Port: 1080]**" <<client>> {
+    
+    class TorClient <<client>> {
+        **- Core Components:**
+        - socks5_server: Arc<Socks5>
+        - stream_manager: Arc<Mutex<StreamManager>>
+        - circuit_manager: Arc<Mutex<CircuitManager>>
+        - runtime: Runtime
+        ==
+        **+ Public API:**
+        + **new(config: ClientConfig) -> Result<Self>**
+        + **start() -> Result<()>**
+        --
+        **- Internal:**
+        - handle_connection(stream, addr)
+    }
+    
+    class ClientConfig <<client>> {
+        + socks5_bind_addr: String
+        + directory_url: String
+        + circuit_pool_size: usize
+        + circuit_max_age: Duration
+    }
+    
+    class StreamManager <<client>> {
+        **- State:**
+        - next_stream_id: StreamId
+        - active_streams: HashMap<StreamId, Stream>
+        - circuit_manager: Arc<Mutex<CircuitManager>>
+        ==
+        **+ Key Methods:**
+        + **handle_new_connection(conn, dest) -> Result<()>**
+        + allocate_stream_id() -> StreamId
+        + close_stream(stream_id) -> Result<()>
+        --
+        **- Internal:**
+        - forward_data(stream_id, circuit_id)
+    }
+    
+    class Stream <<client>> {
+        + id: StreamId
+        + destination: SocketAddr
+        + socks_connection: TcpStream
+        + circuit_id: CircuitId
+        + state: StreamState
+    }
+    
+    enum StreamState <<client>> {
+        Connecting
+        **Connected**
+        Closing
+        Closed
+    }
+    
+    class CircuitManager <<client>> {
+        **- Circuit Pool:**
+        - circuits: Vec<Circuit>
+        - next_circuit_id: CircuitId
+        - max_circuits: usize
+        ==
+        **+ Circuit Operations:**
+        + **select_circuit() -> Result<CircuitId>**
+        + **build_circuit() -> Result<CircuitId>**
+        + send_message(msg: Message) -> Result<()>
+        + open_stream(stream_id, dest) -> Result<()>
+        + close_circuit(circuit_id) -> Result<()>
+        --
+        **- Dependencies:**
+        - directory_client: Arc<DirectoryClient>
+        - crypto_engine: CryptoEngine
+        --
+        **- Internal:**
+        - extend_circuit(circuit_id, node) -> Result<SessionKey>
+    }
+    
+    class Circuit <<client>> {
+        **- Identity:**
+        + id: CircuitId
+        + state: CircuitState
+        + created_at: Instant
+        ==
+        **- Network:**
+        + connection: TcpStream
+        + path: [NodeDescriptor; 3]
+        ==
+        **- Crypto:**
+        + keys: [SessionKey; 3]
+        ==
+        **- Streams:**
+        + streams: HashMap<StreamId, Sender<Message>>
+        ==
+        **+ Methods:**
+        + is_ready() -> bool
+        + is_expired(max_age) -> bool
+        + stream_count() -> usize
+    }
+    
+    enum CircuitState <<client>> {
+        Building
+        **Ready**
+        Closing
+        Closed
+    }
+    
+    class CryptoEngine <<client>> {
+        **- RNG:**
+        - rng: ThreadRng
+        ==
+        **+ DH Handshake:**
+        + create_handshake(pubkey) -> Result<(Secret, Vec<u8>)>
+        + complete_handshake(secret, response) -> Result<SessionKey>
+        ==
+        **+ Onion Crypto:**
+        + **onion_encrypt(data, keys) -> Result<Vec<u8>>**
+        + **onion_decrypt(data, keys) -> Result<Vec<u8>>**
+        ==
+        **+ Layer Crypto:**
+        + aes_encrypt(data, key) -> Result<Vec<u8>>
+        + aes_decrypt(data, key) -> Result<Vec<u8>>
+    }
+    
+    class DirectoryClient <<client>> {
+        **- HTTP Client:**
+        - base_url: String
+        - http_client: reqwest::Client
+        ==
+        **- Cache:**
+        - cached_nodes: Arc<RwLock<Vec<NodeDescriptor>>>
+        - last_fetch: Arc<RwLock<Instant>>
+        ==
+        **+ API:**
+        + **get_random_path(length) -> Result<Vec<NodeDescriptor>>**
+        + get_nodes_by_type(type) -> Result<Vec<NodeDescriptor>>
+        + refresh_cache() -> Result<()>
+    }
+    
+    TorClient *-- ClientConfig
+    TorClient o-- Socks5 : uses
+    TorClient *-- StreamManager
+    TorClient *-- CircuitManager
+    
+    StreamManager *-- "many" Stream
+    StreamManager o-- CircuitManager
+    Stream -- StreamState
+    
+    CircuitManager *-- "3-5" Circuit
+    CircuitManager *-- CryptoEngine
+    CircuitManager o-- DirectoryClient
+    
+    Circuit -- CircuitState
+    Circuit *-- "3" SessionKey
+}
+
+package "Shared Types" {
+    
+    class SessionKey <<shared>> {
+        + forward: [u8; 16]
+        + backward: [u8; 16]
+    }
+    
+    class PublicKey <<shared>> {
+        + bytes: [u8; 32]
+    }
+    
+    class NodeDescriptor <<shared>> {
+        **- Identity:**
+        + node_id: String
+        + node_type: NodeType
+        ==
+        **- Network:**
+        + address: SocketAddr
+        + public_key: PublicKey
+        ==
+        **- Capabilities:**
+        + bandwidth: u64
+        + exit_policy: Option<ExitPolicy>
+        ==
+        **+ Serialization:**
+        + to_json() -> String
+        + from_json(json) -> Result<Self>
+    }
+    
+    enum NodeType <<shared>> {
+        **Entry**
+        **Middle**
+        **Exit**
+    }
+    
+    class ExitPolicy <<shared>> {
+        + allowed_ports: Vec<u16>
+        + blocked_ports: Vec<u16>
+        + allowed_ips: Vec<IpAddr>
+        + blocked_ips: Vec<IpAddr>
+        ==
+        + **allows(dest) -> bool**
+        + default_policy() -> Self
+    }
+    
+    NodeDescriptor *-- NodeType
+    NodeDescriptor *-- PublicKey
+    NodeDescriptor *-- ExitPolicy
+}
+
+package "Protocol" {
+    
+    class Message <<protocol>> {
+        **- Routing:**
+        + circuit_id: CircuitId
+        + stream_id: StreamId
+        ==
+        **- Content:**
+        + command: MessageCommand
+        + data: Vec<u8>
+        ==
+        **+ Wire Format:**
+        + **to_bytes() -> Vec<u8>**
+        + **from_bytes(bytes) -> Result<Self>**
+        ==
+        **Layout:**
+        [Length: 4B | Circuit ID: 4B |
+         Stream ID: 2B | Command: 1B | Data]
+    }
+    
+    enum MessageCommand <<protocol>> {
+        **Circuit-level:**
+        Create = 0x01
+        Created = 0x02
+        Extend = 0x03
+        Extended = 0x04
+        Destroy = 0x05
+        ==
+        **Stream-level:**
+        Begin = 0x10
+        Connected = 0x11
+        Data = 0x12
+        End = 0x13
+    }
+    
+    note right of Message
+        **Type Aliases:**
+        CircuitId = u32
+        StreamId = u16
+    end note
+    
+    Message -- MessageCommand
+}
+
+package "Directory Service\n**[Binary: directory-service, Port: 8080]**" <<directory>> {
+    
+    class DirectoryServer <<directory>> {
+        **- Server:**
+        - bind_addr: SocketAddr
+        - app: Router
+        ==
+        **- Registry:**
+        - registry: Arc<Mutex<NodeRegistry>>
+        ==
+        **+ Lifecycle:**
+        + new(addr: &str) -> Self
+        + **start() -> Result<()>**
+        ==
+        **+ REST API Handlers:**
+        + POST /api/nodes/register
+        + GET /api/nodes
+        + GET /api/nodes/random
+        + POST /api/nodes/{id}/heartbeat
+        + DELETE /api/nodes/{id}
+    }
+    
+    class NodeRegistry <<directory>> {
+        **- Storage:**
+        - nodes: HashMap<String, NodeEntry>
+        ==
+        **+ Node Management:**
+        + **register_node(descriptor) -> Result<()>**
+        + get_all_nodes() -> Vec<NodeDescriptor>
+        + get_nodes_by_type(type) -> Vec<NodeDescriptor>
+        + **get_random_path(length) -> Result<Vec<NodeDescriptor>>**
+        + update_heartbeat(node_id) -> Result<()>
+        + remove_node(node_id) -> Result<()>
+        + cleanup_stale_nodes(timeout: Duration)
+    }
+    
+    class NodeEntry <<directory>> {
+        + descriptor: NodeDescriptor
+        + registered_at: Instant
+        + last_heartbeat: Instant
+    }
+    
+    DirectoryServer *-- NodeRegistry
+    NodeRegistry *-- "many" NodeEntry
+    NodeEntry *-- NodeDescriptor
+}
+
+package "Relay Node Service\n**[Binary: relay-node, Ports: 9001-9003]**" <<relay>> {
+    
+    class RelayNode <<relay>> {
+        **- Configuration:**
+        - node_type: NodeType
+        - bind_addr: SocketAddr
+        - directory_url: String
+        ==
+        **- Crypto:**
+        - keypair: KeyPair
+        ==
+        **- Circuits:**
+        - circuits: Arc<Mutex<HashMap<CircuitId, CircuitHandler>>>
+        ==
+        **+ Lifecycle:**
+        + new(config: RelayConfig) -> Self
+        + **start() -> Result<()>**
+        + register_with_directory() -> Result<()>
+        --
+        **- Internal:**
+        - handle_connection(stream: TcpStream)
+        - send_heartbeat_loop()
+    }
+    
+    class RelayConfig <<relay>> {
+        + node_type: NodeType
+        + bind_addr: String
+        + directory_url: String
+        + bandwidth: u64
+        + exit_policy: Option<ExitPolicy>
+    }
+    
+    class KeyPair <<relay>> {
+        + public: PublicKey
+        + secret: SecretKey
+        ==
+        + generate() -> Self
+        + from_bytes(bytes) -> Result<Self>
+    }
+    
+    abstract class CircuitHandler <<relay>> {
+        **# Protected State:**
+        # circuit_id: CircuitId
+        # session_key: SessionKey
+        # state: CircuitHandlerState
+        ==
+        **+ Abstract Interface:**
+        + {abstract} **handle_message(msg) -> Result<()>**
+        + {abstract} **forward(data) -> Result<()>**
+    }
+    
+    enum CircuitHandlerState <<relay>> {
+        Initializing
+        **Active**
+        Closing
+    }
+    
+    class EntryCircuitHandler <<relay>> {
+        **- Connections:**
+        - next_hop: TcpStream
+        - prev_hop: TcpStream
+        ==
+        **+ Handlers:**
+        + **handle_create(request) -> Result<Vec<u8>>**
+        + handle_relay(cell) -> Result<()>
+        + forward(data) -> Result<()>
+        ==
+        **Role:** First hop
+        **Knows:** Client IP (not destination)
+    }
+    
+    class MiddleCircuitHandler <<relay>> {
+        **- Connections:**
+        - prev_hop: TcpStream
+        - next_hop: TcpStream
+        ==
+        **+ Handlers:**
+        + **handle_extend(request) -> Result<Vec<u8>>**
+        + handle_relay(cell) -> Result<()>
+        + forward(data) -> Result<()>
+        ==
+        **Role:** Middle hop
+        **Knows:** Neither client nor destination
+    }
+    
+    class ExitCircuitHandler <<relay>> {
+        **- Connections:**
+        - prev_hop: TcpStream
+        - streams: HashMap<StreamId, TcpStream>
+        ==
+        **- Policy:**
+        - exit_policy: ExitPolicy
+        ==
+        **+ Handlers:**
+        + **handle_begin(stream_id, dest) -> Result<()>**
+        + handle_data(stream_id, data) -> Result<()>
+        + handle_end(stream_id) -> Result<()>
+        + check_policy(dest) -> bool
+        --
+        **- Internal:**
+        - connect_destination(dest) -> Result<TcpStream>
+        ==
+        **Role:** Exit hop
+        **Knows:** Destination (not client)
+    }
+    
+    RelayNode *-- RelayConfig
+    RelayNode *-- KeyPair
+    RelayNode *-- "many" CircuitHandler
+    
+    KeyPair *-- PublicKey
+    
+    CircuitHandler <|-- EntryCircuitHandler
+    CircuitHandler <|-- MiddleCircuitHandler
+    CircuitHandler <|-- ExitCircuitHandler
+    
+    CircuitHandler -- CircuitHandlerState
+    CircuitHandler o-- SessionKey
+    
+    ExitCircuitHandler o-- ExitPolicy
+}
+
+DirectoryClient .up.> DirectoryServer : HTTP GET/POST
+RelayNode .up.> DirectoryServer : registers
+CircuitManager .right.> Message : creates
+CircuitHandler .left.> Message : processes
+
+
+note top of TorClient
+  **Entry Point**
+  • Spawns async tasks per SOCKS connection
+  • Integrates simple_socks5 library
+  • Single process, port 1080
+end note
+
+note top of StreamManager
+  **Stream Multiplexing**
+  • Allocates unique Stream IDs
+  • Maps SOCKS connections → streams
+  • Multiple streams per circuit
+end note
+
+note top of CircuitManager
+  **Circuit Pool**
+  • Maintains 3-5 ready circuits
+  • Max age: 10 minutes
+  • Least-loaded selection
+end note
+
+note bottom of CryptoEngine
+  **Simplified Crypto**
+  • DH key exchange (not ntor)
+  • AES-128 encryption
+  • 3-layer onion routing
+end note
+
+note top of DirectoryServer
+  **REST API**
+  • HTTP server (Axum)
+  • Single centralized service
+  • Future: Multi-authority consensus
+end note
+
+note top of RelayNode
+  **Flexible Node**
+  • Same binary, different modes
+  • --type entry/middle/exit
+  • Self-registers with directory
+end note
+
+note right of EntryCircuitHandler
+  **Anonymity Property:**
+  Knows client IP
+  Does NOT know destination
+end note
+
+note right of ExitCircuitHandler
+  **Anonymity Property:**
+  Knows destination
+  Does NOT know client IP
+end note
+
+@enduml
