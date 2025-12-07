@@ -1,0 +1,2 @@
+include:
+  - path: services/discovery/docker-compose.yml

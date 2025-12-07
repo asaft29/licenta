@@ -1,0 +1,11 @@
+[package]
+name = "relay-node"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+common = { path = "../common" }
+tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true

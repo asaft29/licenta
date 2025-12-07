@@ -1,0 +1,29 @@
+services:
+  discovery:
+    build:
+      context: ../..
+      dockerfile: services/discovery/Dockerfile
+    container_name: tor-discovery
+    ports:
+      - "8080:8080"
+    volumes:
+      - discovery-data:/app/data
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - tor-network
+
+volumes:
+  discovery-data:
+    driver: local
+
+networks:
+  tor-network:
+    driver: bridge
