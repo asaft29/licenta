@@ -25,5 +25,3 @@ services:
     networks:
       - tor-network
     restart: unless-stopped
-
-

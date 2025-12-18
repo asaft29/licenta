@@ -3,5 +3,5 @@ include:
   - services/relay-node/docker-compose.yaml
 
 networks:
-  shared-network:
+  tor-network:
     driver: bridge

@@ -23,5 +23,3 @@ services:
 volumes:
   discovery-data:
     driver: local
-
-
