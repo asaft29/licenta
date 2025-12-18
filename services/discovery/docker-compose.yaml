@@ -24,6 +24,4 @@ volumes:
   discovery-data:
     driver: local
 
-networks:
-  tor-network:
-    driver: bridge
+

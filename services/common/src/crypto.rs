@@ -1,7 +1,12 @@
+use aes::cipher::{KeyIvInit, StreamCipher};
+use aes::Aes128;
+use ctr::Ctr128BE;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-/// Session key for encrypted communication between nodes (from class diagram lines 257-260)
-///
+type Aes128Ctr = Ctr128BE<Aes128>;
+
+/// Session key for encrypted communication between nodes
 /// Contains separate keys for forward (client to server) and backward (server to client) communication
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionKey {
@@ -61,6 +66,43 @@ impl Default for SessionKey {
     }
 }
 
+/// Encrypt data using AES-128 in CTR mode
+/// Returns encrypted data (same length as input)
+pub fn aes_encrypt(data: &[u8], key: &[u8; 16]) -> Vec<u8> {
+    // Use a zero IV for simplicity (in production, use proper IV management)
+    let iv = [0u8; 16];
+    let mut cipher = Aes128Ctr::new(key.into(), &iv.into());
+
+    let mut buffer = data.to_vec();
+    cipher.apply_keystream(&mut buffer);
+    buffer
+}
+
+/// Decrypt data using AES-128 in CTR mode
+/// Returns decrypted data (same length as input)
+/// Note: CTR mode encryption and decryption are the same operation
+pub fn aes_decrypt(data: &[u8], key: &[u8; 16]) -> Vec<u8> {
+    // CTR mode: encryption and decryption are identical
+    aes_encrypt(data, key)
+}
+
+/// Derive session key from shared secret using SHA-256
+/// Takes a 32-byte shared secret and produces forward/backward keys
+pub fn derive_session_key(shared_secret: &[u8; 32]) -> SessionKey {
+    SessionKey::from_shared(shared_secret)
+}
+
+/// Hash data using SHA-256
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&result);
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +147,56 @@ mod tests {
     fn test_session_key_default() {
         let key = SessionKey::default();
         assert_eq!(key, SessionKey::zero());
+    }
+
+    #[test]
+    fn test_aes_encrypt_decrypt() {
+        let key = [0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+                   0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c];
+        let plaintext = b"Hello, World!";
+
+        let ciphertext = aes_encrypt(plaintext, &key);
+        assert_ne!(ciphertext, plaintext);
+
+        let decrypted = aes_decrypt(&ciphertext, &key);
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_aes_ctr_symmetry() {
+        let key = [42u8; 16];
+        let data = b"This is a test message for AES-128 CTR mode";
+
+        // Encrypt
+        let encrypted = aes_encrypt(data, &key);
+
+        // Decrypt (should be same as encrypt in CTR mode)
+        let decrypted = aes_decrypt(&encrypted, &key);
+
+        assert_eq!(&decrypted, data);
+    }
+
+    #[test]
+    fn test_derive_session_key() {
+        let shared_secret = [0xAB; 32];
+        let session_key = derive_session_key(&shared_secret);
+
+        // Should derive consistent keys
+        assert_eq!(session_key.forward, SessionKey::from_shared(&shared_secret).forward);
+        assert_eq!(session_key.backward, SessionKey::from_shared(&shared_secret).backward);
+    }
+
+    #[test]
+    fn test_sha256() {
+        let data = b"test data";
+        let hash1 = sha256(data);
+        let hash2 = sha256(data);
+
+        // Same input should produce same hash
+        assert_eq!(hash1, hash2);
+
+        // Different input should produce different hash
+        let hash3 = sha256(b"different data");
+        assert_ne!(hash1, hash3);
     }
 }

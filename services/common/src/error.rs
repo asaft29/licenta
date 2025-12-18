@@ -1,8 +1,7 @@
+pub use anyhow::{Context, Result, anyhow};
 use thiserror::Error;
-pub use anyhow::{anyhow, Context, Result};
 
-/// Specific error types for the Tor-like system
-/// Use thiserror for structured errors, anyhow::Result for functions
+/// Specific error types
 #[derive(Debug, Error)]
 pub enum TorError {
     #[error("IO error: {0}")]

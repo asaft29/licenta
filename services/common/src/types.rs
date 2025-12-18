@@ -79,7 +79,7 @@ impl std::fmt::Display for PublicKey {
     }
 }
 
-/// Exit policy for exit nodes (from class diagram lines 290-298)
+/// Exit policy for exit nodes
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ExitPolicy {
     pub allowed_ports: Vec<u16>,
@@ -111,7 +111,7 @@ impl ExitPolicy {
         }
     }
 
-    /// Check if connection to destination is allowed (from class diagram line 296)
+    /// Check if connection to destination is allowed
     pub fn allows(&self, addr: &SocketAddr) -> bool {
         let port = addr.port();
         let ip = addr.ip();
@@ -177,7 +177,7 @@ impl NodeDescriptor {
         }
     }
 
-    /// Serialize to JSON (from class diagram line 280)
+    /// Serialize to JSON 
     ///
     /// # Errors
     /// Returns a serde_json error if serialization fails
@@ -185,7 +185,7 @@ impl NodeDescriptor {
         serde_json::to_string(self)
     }
 
-    /// Deserialize from JSON (from class diagram line 281)
+    /// Deserialize from JSON 
     ///
     /// # Errors
     /// Returns a serde_json error if JSON is invalid or doesn't match the schema

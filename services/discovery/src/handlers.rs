@@ -47,7 +47,7 @@ pub async fn register_node(
         ));
     }
 
-    let mut registry = registry.lock().await;
+    let mut registry = registry.write().await;
     registry.register_node(descriptor);
 
     Ok((StatusCode::CREATED, "Node registered successfully"))
@@ -63,7 +63,7 @@ pub async fn register_node(
     tag = "nodes"
 )]
 pub async fn get_all_nodes(State(registry): State<AppState>) -> Result<Json<NodesResponse>> {
-    let registry = registry.lock().await;
+    let registry = registry.read().await;
     let nodes = registry.get_all_nodes();
     let count = nodes.len();
 
@@ -83,7 +83,7 @@ pub async fn get_all_nodes(State(registry): State<AppState>) -> Result<Json<Node
 pub async fn get_random_path(
     State(registry): State<AppState>,
 ) -> Result<Json<Vec<NodeDescriptor>>> {
-    let registry = registry.lock().await;
+    let registry = registry.read().await;
     let path_arcs = registry.get_random_path()?;
     let path: Vec<NodeDescriptor> = path_arcs.iter().map(|arc| (**arc).clone()).collect();
 
@@ -107,7 +107,7 @@ pub async fn update_heartbeat(
     State(registry): State<AppState>,
     Path(node_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let mut registry = registry.lock().await;
+    let mut registry = registry.write().await;
     registry.update_heartbeat(&node_id)?;
 
     Ok(StatusCode::OK)
@@ -130,7 +130,7 @@ pub async fn remove_node(
     State(registry): State<AppState>,
     Path(node_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let mut registry = registry.lock().await;
+    let mut registry = registry.write().await;
     registry.remove_node(&node_id)?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -146,7 +146,7 @@ pub async fn remove_node(
     tag = "stats"
 )]
 pub async fn get_stats(State(registry): State<AppState>) -> Result<Json<RegistryStats>> {
-    let registry = registry.lock().await;
+    let registry = registry.read().await;
     let stats = registry.get_stats();
 
     Ok(Json(stats))
@@ -173,7 +173,7 @@ pub struct HealthResponse {
     tag = "health"
 )]
 pub async fn health_check(State(registry): State<AppState>) -> impl IntoResponse {
-    let registry = registry.lock().await;
+    let registry = registry.read().await;
     let ready = registry.is_ready();
 
     let response = HealthResponse {
@@ -202,7 +202,7 @@ pub async fn health_check(State(registry): State<AppState>) -> impl IntoResponse
     tag = "health"
 )]
 pub async fn readiness_check(State(registry): State<AppState>) -> Result<impl IntoResponse> {
-    let registry = registry.lock().await;
+    let registry = registry.read().await;
 
     if registry.is_ready() {
         Ok((StatusCode::OK, "Ready"))

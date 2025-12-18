@@ -6,7 +6,7 @@ mod routes;
 
 use registry::NodeRegistry;
 use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,8 +24,9 @@ async fn main() -> anyhow::Result<()> {
     let consensus_path = PathBuf::from(consensus_path);
 
     if let Some(parent) = consensus_path.parent()
-        && !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
 
     let mut registry = NodeRegistry::new(consensus_path);
@@ -34,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("Failed to load consensus: {}", e);
     }
 
-    let registry = Arc::new(Mutex::new(registry));
+    let registry = Arc::new(RwLock::new(registry));
 
     spawn_background_tasks(registry.clone());
 
@@ -52,13 +53,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Spawn background tasks for periodic maintenance
-fn spawn_background_tasks(registry: Arc<Mutex<NodeRegistry>>) {
+fn spawn_background_tasks(registry: Arc<RwLock<NodeRegistry>>) {
     let registry_save = registry.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
-            let registry = registry_save.lock().await;
+            let registry = registry_save.read().await;
             if let Err(e) = registry.save().await {
                 tracing::error!("Failed to save consensus: {}", e);
             }
@@ -70,7 +71,7 @@ fn spawn_background_tasks(registry: Arc<Mutex<NodeRegistry>>) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let mut registry = registry_cleanup.lock().await;
+            let mut registry = registry_cleanup.write().await;
             let removed = registry.cleanup_stale_nodes(Duration::from_secs(120));
             if removed > 0 {
                 tracing::info!("Cleaned up {} stale nodes", removed);

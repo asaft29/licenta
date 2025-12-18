@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-/// Type aliases for IDs (from class diagram note lines 341-343)
+/// Type aliases for IDs
 pub type CircuitId = u32;
 pub type StreamId = u16;
 
-/// Message commands for the Tor protocol (from class diagram lines 325-338)
+/// Message commands for the Tor protocol
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum MessageCommand {
@@ -152,7 +152,8 @@ impl Message {
         }
 
         // Parse length (4 bytes)
-        let length_bytes: [u8; 4] = bytes.get(0..4)
+        let length_bytes: [u8; 4] = bytes
+            .get(0..4)
             .and_then(|s| s.try_into().ok())
             .ok_or("Incomplete message: missing length")?;
         let length = u32::from_be_bytes(length_bytes) as usize;
@@ -167,13 +168,15 @@ impl Message {
         }
 
         // Parse circuit ID (4 bytes)
-        let circuit_bytes: [u8; 4] = bytes.get(4..8)
+        let circuit_bytes: [u8; 4] = bytes
+            .get(4..8)
             .and_then(|s| s.try_into().ok())
             .ok_or("Incomplete message: missing circuit ID")?;
         let circuit_id = u32::from_be_bytes(circuit_bytes);
 
         // Parse stream ID (2 bytes)
-        let stream_bytes: [u8; 2] = bytes.get(8..10)
+        let stream_bytes: [u8; 2] = bytes
+            .get(8..10)
             .and_then(|s| s.try_into().ok())
             .ok_or("Incomplete message: missing stream ID")?;
         let stream_id = u16::from_be_bytes(stream_bytes);
@@ -183,7 +186,10 @@ impl Message {
         let command = MessageCommand::from_u8(*command_byte)?;
 
         // Parse data (remaining bytes)
-        let data = bytes.get(11..4 + length).ok_or("Incomplete message: missing data")?.to_vec();
+        let data = bytes
+            .get(11..4 + length)
+            .ok_or("Incomplete message: missing data")?
+            .to_vec();
 
         Ok(Self {
             circuit_id,
@@ -214,6 +220,43 @@ impl Message {
 
         // Parse
         Self::from_bytes(&full_buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    /// Read a message from an async stream
+    ///
+    /// Returns None if the connection was closed gracefully
+    ///
+    /// # Errors
+    /// Returns IO errors if reading fails or if message format is invalid
+    pub async fn from_stream<S>(stream: &mut S) -> io::Result<Option<Self>>
+    where
+        S: tokio::io::AsyncReadExt + Unpin,
+    {
+        // Read length (4 bytes)
+        let mut len_buf = [0u8; 4];
+        match stream.read_exact(&mut len_buf).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                return Ok(None); // Connection closed
+            }
+            Err(e) => return Err(e),
+        }
+
+        let length = u32::from_be_bytes(len_buf) as usize;
+
+        // Read the rest of the message
+        let mut msg_buf = vec![0u8; length];
+        stream.read_exact(&mut msg_buf).await?;
+
+        // Combine length + message data
+        let mut full_buf = Vec::with_capacity(4 + length);
+        full_buf.extend_from_slice(&len_buf);
+        full_buf.extend_from_slice(&msg_buf);
+
+        // Parse
+        Self::from_bytes(&full_buf)
+            .map(Some)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Write a message to a stream (blocking)
@@ -296,11 +339,9 @@ mod tests {
 
         let msg = Message::stream(999, 42, MessageCommand::Begin, b"example.com:80".to_vec());
 
-        // Write to buffer
         let mut buffer = Vec::new();
         msg.write_to(&mut buffer).unwrap();
 
-        // Read from buffer
         let mut cursor = Cursor::new(buffer);
         let msg2 = Message::read_from(&mut cursor).unwrap();
 

@@ -1,0 +1,7 @@
+include:
+  - services/discovery/docker-compose.yaml
+  - services/relay-node/docker-compose.yaml
+
+networks:
+  shared-network:
+    driver: bridge

@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs;
 
+pub type AppState = Arc<tokio::sync::RwLock<NodeRegistry>>;
+
 /// Entry in the node registry with metadata
 #[derive(Debug, Clone)]
 pub struct NodeEntry {
@@ -16,11 +18,66 @@ pub struct NodeEntry {
     pub last_heartbeat: Instant,
 }
 
+impl NodeEntry {
+    fn new(d: Arc<NodeDescriptor>, reg: Instant, last: Instant) -> Self {
+        Self {
+            descriptor: d,
+            registered_at: reg,
+            last_heartbeat: last,
+        }
+    }
+}
+
 /// Consensus document for disk persistence
 #[derive(Debug, Serialize, Deserialize)]
 struct Consensus {
     generated_at: chrono::DateTime<chrono::Utc>,
     nodes: Vec<NodeDescriptor>,
+}
+
+impl Consensus {
+    fn new(gen_at: chrono::DateTime<chrono::Utc>, nodes: Vec<NodeDescriptor>) -> Self {
+        Self {
+            generated_at: gen_at,
+            nodes,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RegistryStats {
+    /// Total number of registered nodes
+    pub total_nodes: usize,
+    /// Number of entry nodes
+    pub entry_count: usize,
+    /// Number of middle nodes
+    pub middle_count: usize,
+    /// Number of exit nodes
+    pub exit_count: usize,
+    /// Age in seconds of the oldest registered node (None if no nodes)
+    pub oldest_node_age_secs: Option<u64>,
+    /// Age in seconds of the newest registered node (None if no nodes)
+    pub newest_node_age_secs: Option<u64>,
+}
+
+impl RegistryStats {
+    fn new(
+        total: usize,
+        entry_c: usize,
+        middle_c: usize,
+        exit_c: usize,
+        oldest: Option<u64>,
+        newest: Option<u64>,
+    ) -> Self {
+        Self {
+            total_nodes: total,
+            entry_count: entry_c,
+            middle_count: middle_c,
+            exit_count: exit_c,
+            oldest_node_age_secs: oldest,
+            newest_node_age_secs: newest,
+        }
+    }
 }
 
 /// Node registry - stores all registered relay nodes
@@ -49,13 +106,9 @@ impl NodeRegistry {
         let consensus: Consensus = serde_json::from_str(&data)?;
 
         let now = Instant::now();
-        for node in consensus.nodes {
+        for node in consensus.nodes.into_iter() {
             let node_id = node.node_id.clone();
-            let entry = NodeEntry {
-                descriptor: Arc::new(node),
-                registered_at: now,
-                last_heartbeat: now,
-            };
+            let entry = NodeEntry::new(Arc::new(node), now, now);
             self.nodes.insert(node_id, entry);
         }
 
@@ -65,10 +118,7 @@ impl NodeRegistry {
 
     /// Save consensus to disk
     pub async fn save(&self) -> anyhow::Result<()> {
-        let consensus = Consensus {
-            generated_at: chrono::Utc::now(),
-            nodes: self.get_all_nodes(),
-        };
+        let consensus = Consensus::new(chrono::Utc::now(), self.get_all_nodes());
 
         let json = serde_json::to_string_pretty(&consensus)?;
         fs::write(&self.consensus_path, json).await?;
@@ -82,22 +132,20 @@ impl NodeRegistry {
         let node_id = descriptor.node_id.clone();
         let now = Instant::now();
 
-        if self.nodes.contains_key(&node_id) {
-            // Update existing node
-            if let Some(entry) = self.nodes.get_mut(&node_id) {
-                entry.descriptor = Arc::new(descriptor);
-                entry.last_heartbeat = now;
-                tracing::info!("Updated node: {}", node_id);
+        match self.nodes.contains_key(&node_id) {
+            false => {
+                let entry = NodeEntry::new(Arc::new(descriptor), now, now);
+                self.nodes.insert(node_id.clone(), entry);
+                tracing::info!("Registered new node: {}", node_id);
             }
-        } else {
-            // Register new node
-            let entry = NodeEntry {
-                descriptor: Arc::new(descriptor),
-                registered_at: now,
-                last_heartbeat: now,
-            };
-            self.nodes.insert(node_id.clone(), entry);
-            tracing::info!("Registered new node: {}", node_id);
+            true => match self.nodes.get_mut(&node_id) {
+                Some(entry) => {
+                    entry.descriptor = Arc::new(descriptor);
+                    entry.last_heartbeat = now;
+                    tracing::info!("Updated node: {}", node_id);
+                }
+                _ => {}
+            },
         }
     }
 
@@ -113,7 +161,7 @@ impl NodeRegistry {
     pub fn get_nodes_by_type(&self, node_type: NodeType) -> Vec<Arc<NodeDescriptor>> {
         self.nodes
             .values()
-            .filter(|entry| entry.descriptor.node_type == node_type)
+            .filter(|entry| entry.descriptor.node_type.eq(&node_type))
             .map(|entry| Arc::clone(&entry.descriptor))
             .collect()
     }
@@ -154,7 +202,8 @@ impl NodeRegistry {
         nodes: &[Arc<NodeDescriptor>],
         rng: &mut R,
     ) -> Result<Arc<NodeDescriptor>, RegistryError> {
-        let first_node = nodes.first()
+        let first_node = nodes
+            .first()
             .ok_or_else(|| RegistryError::InsufficientNodes("Empty node list".to_string()))?;
 
         let total_bandwidth: u64 = nodes.iter().map(|n| n.bandwidth).sum();
@@ -267,31 +316,13 @@ impl NodeRegistry {
         let oldest_node_age_secs = oldest_registration.map(|t| now.duration_since(t).as_secs());
         let newest_node_age_secs = newest_registration.map(|t| now.duration_since(t).as_secs());
 
-        RegistryStats {
-            total_nodes: self.nodes.len(),
+        RegistryStats::new(
+            self.nodes.len(),
             entry_count,
             middle_count,
             exit_count,
             oldest_node_age_secs,
             newest_node_age_secs,
-        }
+        )
     }
 }
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct RegistryStats {
-    /// Total number of registered nodes
-    pub total_nodes: usize,
-    /// Number of entry nodes
-    pub entry_count: usize,
-    /// Number of middle nodes
-    pub middle_count: usize,
-    /// Number of exit nodes
-    pub exit_count: usize,
-    /// Age in seconds of the oldest registered node (None if no nodes)
-    pub oldest_node_age_secs: Option<u64>,
-    /// Age in seconds of the newest registered node (None if no nodes)
-    pub newest_node_age_secs: Option<u64>,
-}
-
-pub type AppState = Arc<tokio::sync::Mutex<NodeRegistry>>;

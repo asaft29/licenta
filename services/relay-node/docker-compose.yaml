@@ -1,0 +1,29 @@
+services:
+  relay-node:
+    build:
+      context: ../..
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-node
+    ports:
+      - "${RELAY_PORT:-9001}:9001"
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - NODE_TYPE=${NODE_TYPE:-entry}
+      - DIRECTORY_URL=${DIRECTORY_URL:-http://discovery:8080}
+      - BANDWIDTH=${BANDWIDTH:-1000000}
+    command:
+      - "--node-type"
+      - "${NODE_TYPE:-entry}"
+      - "--port"
+      - "9001"
+      - "--host"
+      - "0.0.0.0"
+      - "--directory-url"
+      - "${DIRECTORY_URL:-http://discovery:8080}"
+      - "--bandwidth"
+      - "${BANDWIDTH:-1000000}"
+    networks:
+      - tor-network
+    restart: unless-stopped
+
+
