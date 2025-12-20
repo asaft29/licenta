@@ -1,6 +1,6 @@
-use crate::entry_handler::EntryCircuitHandler;
-use crate::exit_handler::ExitCircuitHandler;
-use crate::middle_handler::MiddleCircuitHandler;
+use crate::circuit::entry::EntryCircuitHandler;
+use crate::circuit::exit::ExitCircuitHandler;
+use crate::circuit::middle::MiddleCircuitHandler;
 use common::{
     crypto::SessionKey,
     protocol::{CircuitId, Message, MessageCommand},
@@ -98,29 +98,30 @@ impl CircuitHandler {
     /// Spawn background task to read from next hop and send backward messages
     pub fn spawn_nexthop_reader(
         &mut self,
-        circuit_manager: std::sync::Arc<tokio::sync::Mutex<CircuitManager>>,
+        circuit_registry: std::sync::Arc<tokio::sync::Mutex<CircuitRegistry>>,
         client_stream: std::sync::Arc<tokio::sync::Mutex<TcpStream>>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         match self {
             CircuitHandler::Entry(handler) => {
-                handler.spawn_nexthop_reader(circuit_manager, client_stream)
+                handler.spawn_nexthop_reader(circuit_registry, client_stream)
             }
             CircuitHandler::Middle(handler) => {
-                handler.spawn_nexthop_reader(circuit_manager, client_stream)
+                handler.spawn_nexthop_reader(circuit_registry, client_stream)
             }
             CircuitHandler::Exit(_) => None, // Exit nodes don't have next hops to read from
         }
     }
 }
 
-/// Manages all circuits for a relay node
-pub struct CircuitManager {
+/// Registry of all circuits handled by this relay node
+/// Unlike the client's CircuitManager, this only tracks local circuit state
+pub struct CircuitRegistry {
     circuits: HashMap<CircuitId, CircuitHandler>,
     next_circuit_id: CircuitId,
 }
 
-impl CircuitManager {
-    /// Create a new circuit manager
+impl CircuitRegistry {
+    /// Create a new circuit registry
     pub fn new() -> Self {
         Self {
             circuits: HashMap::new(),
@@ -196,7 +197,7 @@ impl CircuitManager {
     }
 }
 
-impl Default for CircuitManager {
+impl Default for CircuitRegistry {
     fn default() -> Self {
         Self::new()
     }

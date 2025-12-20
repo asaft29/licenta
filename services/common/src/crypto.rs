@@ -1,9 +1,10 @@
-use aes::cipher::{KeyIvInit, StreamCipher};
 use aes::Aes128;
+use aes::cipher::{KeyIvInit, StreamCipher};
+use anyhow::anyhow;
 use ctr::Ctr128BE;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-
 type Aes128Ctr = Ctr128BE<Aes128>;
 
 /// Session key for encrypted communication between nodes
@@ -69,21 +70,50 @@ impl Default for SessionKey {
 /// Encrypt data using AES-128 in CTR mode
 /// Returns encrypted data (same length as input)
 pub fn aes_encrypt(data: &[u8], key: &[u8; 16]) -> Vec<u8> {
-    // Use a zero IV for simplicity (in production, use proper IV management)
-    let iv = [0u8; 16];
+    // 1. Generate a random 16-byte IV
+    let mut iv = [0u8; 16];
+    rand::rng().fill(&mut iv);
+
+    // 2. Initialize cipher with the Key and random IV
     let mut cipher = Aes128Ctr::new(key.into(), &iv.into());
 
-    let mut buffer = data.to_vec();
-    cipher.apply_keystream(&mut buffer);
-    buffer
+    // 3. Encrypt the data
+    let mut ciphertext = data.to_vec();
+    cipher.apply_keystream(&mut ciphertext);
+
+    // 4. Prepend the IV to the output
+    // Result format: [IV ... IV | Ciphertext ... Ciphertext]
+    let mut output = Vec::with_capacity(16 + ciphertext.len());
+    output.extend_from_slice(&iv);
+    output.extend_from_slice(&ciphertext);
+
+    output
 }
 
 /// Decrypt data using AES-128 in CTR mode
 /// Returns decrypted data (same length as input)
 /// Note: CTR mode encryption and decryption are the same operation
-pub fn aes_decrypt(data: &[u8], key: &[u8; 16]) -> Vec<u8> {
-    // CTR mode: encryption and decryption are identical
-    aes_encrypt(data, key)
+pub fn aes_decrypt(data: &[u8], key: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
+    // 1. Validate length (must have at least the IV)
+    if data.len() < 16 {
+        return Err(anyhow!(
+            "Invalid ciphertext: length {} is too short (min 16)",
+            data.len()
+        ));
+    }
+
+    // 2. Extract the IV (first 16 bytes)
+    let iv_slice = &data[0..16];
+    let ciphertext = &data[16..];
+
+    // 3. Initialize cipher with the Key and EXTRACTED IV
+    let mut cipher = Aes128Ctr::new(key.into(), iv_slice.into());
+
+    // 4. Decrypt (CTR decryption is the same operation as encryption)
+    let mut plaintext = ciphertext.to_vec();
+    cipher.apply_keystream(&mut plaintext);
+
+    Ok(plaintext)
 }
 
 /// Derive session key from shared secret using SHA-256
@@ -150,20 +180,23 @@ mod tests {
     }
 
     #[test]
-    fn test_aes_encrypt_decrypt() {
-        let key = [0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
-                   0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c];
+    fn test_aes_encrypt_decrypt() -> anyhow::Result<()> {
+        let key = [
+            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
+            0x4f, 0x3c,
+        ];
         let plaintext = b"Hello, World!";
 
         let ciphertext = aes_encrypt(plaintext, &key);
         assert_ne!(ciphertext, plaintext);
 
-        let decrypted = aes_decrypt(&ciphertext, &key);
+        let decrypted = aes_decrypt(&ciphertext, &key)?;
         assert_eq!(decrypted, plaintext);
+        Ok(())
     }
 
     #[test]
-    fn test_aes_ctr_symmetry() {
+    fn test_aes_ctr_symmetry() -> anyhow::Result<()> {
         let key = [42u8; 16];
         let data = b"This is a test message for AES-128 CTR mode";
 
@@ -171,9 +204,10 @@ mod tests {
         let encrypted = aes_encrypt(data, &key);
 
         // Decrypt (should be same as encrypt in CTR mode)
-        let decrypted = aes_decrypt(&encrypted, &key);
+        let decrypted = aes_decrypt(&encrypted, &key)?;
 
         assert_eq!(&decrypted, data);
+        Ok(())
     }
 
     #[test]
@@ -182,8 +216,14 @@ mod tests {
         let session_key = derive_session_key(&shared_secret);
 
         // Should derive consistent keys
-        assert_eq!(session_key.forward, SessionKey::from_shared(&shared_secret).forward);
-        assert_eq!(session_key.backward, SessionKey::from_shared(&shared_secret).backward);
+        assert_eq!(
+            session_key.forward,
+            SessionKey::from_shared(&shared_secret).forward
+        );
+        assert_eq!(
+            session_key.backward,
+            SessionKey::from_shared(&shared_secret).backward
+        );
     }
 
     #[test]

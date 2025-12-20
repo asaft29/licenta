@@ -1,4 +1,4 @@
-use crate::circuit_handler::{CircuitContext, CircuitState, NextHop};
+use crate::circuit::handler::{CircuitContext, CircuitState, NextHop};
 use crate::keypair::KeyPair;
 use common::{
     crypto::{SessionKey, aes_decrypt, aes_encrypt, derive_session_key},
@@ -109,12 +109,10 @@ impl MiddleCircuitHandler {
         debug!("Middle: Connected to next hop at {}", addr);
 
         // Send CREATE message to next hop with our public key
-        let create_msg = Message {
-            circuit_id: self.context.circuit_id,
-            stream_id: 0,
-            command: MessageCommand::Create,
-            data: self.keypair.public_key().bytes.to_vec(),
-        };
+        let create_msg = Message::create(
+            self.context.circuit_id,
+            self.keypair.public_key().bytes.to_vec(),
+        );
 
         let create_bytes = create_msg.to_bytes();
         stream.write_all(&create_bytes).await?;
@@ -161,12 +159,10 @@ impl MiddleCircuitHandler {
         // We just store the next hop connection
 
         // Send EXTENDED back to previous hop with next hop's public key
-        Ok(Some(Message {
-            circuit_id: self.context.circuit_id,
-            stream_id: 0,
-            command: MessageCommand::Extended,
-            data: next_public.to_vec(),
-        }))
+        Ok(Some(Message::extended(
+            self.context.circuit_id,
+            next_public.to_vec(),
+        )))
     }
 
     /// Handle CREATE message (from previous hop establishing circuit with us)
@@ -199,12 +195,10 @@ impl MiddleCircuitHandler {
         );
 
         // Send CREATED response with our public key
-        Ok(Some(Message {
-            circuit_id: self.context.circuit_id,
-            stream_id: 0,
-            command: MessageCommand::Created,
-            data: self.keypair.public_key().bytes.to_vec(),
-        }))
+        Ok(Some(Message::created(
+            self.context.circuit_id,
+            self.keypair.public_key().bytes.to_vec(),
+        )))
     }
 
     /// Handle relay cell (encrypted data)
@@ -224,23 +218,17 @@ impl MiddleCircuitHandler {
             .ok_or_else(|| anyhow::anyhow!("No session key established"))?;
 
         // Decrypt one layer (forward direction: entry -> middle -> exit)
-        let decrypted = aes_decrypt(&msg.data, &session_key.forward);
+        let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
 
         // Forward to next hop
         if let Some(next_hop) = &mut self.next_hop {
-            let relay_msg = Message {
-                circuit_id: msg.circuit_id,
-                stream_id: msg.stream_id,
-                command: MessageCommand::Data,
-                data: decrypted,
-            };
+            let relay_msg = Message::data(msg.circuit_id, msg.stream_id, decrypted);
 
             let bytes = relay_msg.to_bytes();
             next_hop.write.write_all(&bytes).await?;
             debug!("Middle: Forwarded relay cell to next hop");
 
-            // TODO: Read response from next hop and encrypt it with backward key
-            // This requires a background task or refactoring to handle bidirectional flow
+            // Response from next hop is handled by spawn_nexthop_reader background task
         } else {
             error!(
                 "Middle: No next hop configured for circuit {}",
@@ -269,12 +257,12 @@ impl MiddleCircuitHandler {
         // Encrypt one layer for backward direction (exit -> middle -> entry)
         let encrypted = aes_encrypt(&msg.data, &session_key.backward);
 
-        Ok(Some(Message {
-            circuit_id: msg.circuit_id,
-            stream_id: msg.stream_id,
-            command: msg.command,
-            data: encrypted,
-        }))
+        Ok(Some(Message::new(
+            msg.circuit_id,
+            msg.stream_id,
+            msg.command,
+            encrypted,
+        )))
     }
 
     /// Handle an incoming message on this circuit
@@ -325,7 +313,7 @@ impl MiddleCircuitHandler {
     /// Returns the task handle
     pub fn spawn_nexthop_reader(
         &mut self,
-        circuit_manager: Arc<Mutex<crate::circuit_handler::CircuitManager>>,
+        circuit_registry: Arc<Mutex<crate::circuit::handler::CircuitRegistry>>,
         prev_hop_stream: Arc<Mutex<TcpStream>>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let circuit_id = self.context.circuit_id;
@@ -348,12 +336,12 @@ impl MiddleCircuitHandler {
                             circuit_id
                         );
 
-                        // Process through circuit manager to re-encrypt
+                        // Process through circuit registry to re-encrypt
                         let response = {
-                            let mut manager = circuit_manager.lock().await;
-                            match manager.handle_backward_message(msg).await {
+                            let mut registry = circuit_registry.lock().await;
+                            match registry.handle_backward_message(msg).await {
                                 Ok(Some(response)) => response,
-                                Ok(None) => continue,
+                                Ok(_) => continue,
                                 Err(e) => {
                                     error!("Middle: Error handling backward message: {}", e);
                                     break;
@@ -373,7 +361,7 @@ impl MiddleCircuitHandler {
                         }
                         debug!("Middle: Sent backward message to previous hop");
                     }
-                    Ok(None) => {
+                    Ok(_) => {
                         info!(
                             "Middle: Next hop closed connection for circuit {}",
                             circuit_id

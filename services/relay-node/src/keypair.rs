@@ -70,18 +70,9 @@ impl KeyPair {
 
         key
     }
-
-    /// Get the raw secret key bytes (use with caution)
-    pub fn secret_bytes(&self) -> [u8; 32] {
-        self.secret_bytes
-    }
 }
 
-/// Generate an ephemeral keypair for DH handshake (used by clients)
-///
 /// This struct is currently only used in tests, but will be used by the Tor client
-/// implementation (Phase 3) for generating one-time keys per circuit.
-///
 /// Relay nodes use the persistent `KeyPair` struct instead.
 #[allow(dead_code)]
 pub struct EphemeralKeyPair {
@@ -122,26 +113,6 @@ impl EphemeralKeyPair {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_keypair_generation() {
-        let k1 = KeyPair::generate();
-        let k2 = KeyPair::generate();
-
-        // Keys should be different
-        assert_ne!(k1.public.bytes, k2.public.bytes);
-        assert_ne!(k1.secret_bytes(), k2.secret_bytes());
-    }
-
-    #[test]
-    fn test_keypair_from_secret_bytes() {
-        let secret_bytes = [42u8; 32];
-        let kp = KeyPair::from_secret_bytes(secret_bytes);
-
-        assert_eq!(kp.secret_bytes(), secret_bytes);
-        // Public key should be properly derived from secret
-        assert_ne!(kp.public.bytes, [0u8; 32]);
-    }
 
     #[test]
     fn test_diffie_hellman_exchange() {

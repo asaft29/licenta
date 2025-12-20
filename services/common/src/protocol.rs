@@ -65,7 +65,7 @@ impl std::fmt::Display for MessageCommand {
     }
 }
 
-/// Wire protocol message (from class diagram lines 307-323)
+/// Wire protocol message
 ///
 /// Wire format layout:
 /// [Length: 4B | Circuit ID: 4B | Stream ID: 2B | Command: 1B | Data: variable]
@@ -111,7 +111,54 @@ impl Message {
         Self::new(circuit_id, stream_id, command, data)
     }
 
-    /// Serialize to wire format bytes (from class diagram line 317)
+    // Circuit-level message constructors
+
+    /// Create a CREATE message with public key
+    pub fn create(circuit_id: CircuitId, public_key: Vec<u8>) -> Self {
+        Self::circuit(circuit_id, MessageCommand::Create, public_key)
+    }
+
+    /// Create a CREATED message with public key
+    pub fn created(circuit_id: CircuitId, public_key: Vec<u8>) -> Self {
+        Self::circuit(circuit_id, MessageCommand::Created, public_key)
+    }
+
+    /// Create an EXTEND message with encrypted payload
+    pub fn extend(circuit_id: CircuitId, encrypted_payload: Vec<u8>) -> Self {
+        Self::circuit(circuit_id, MessageCommand::Extend, encrypted_payload)
+    }
+
+    /// Create an EXTENDED message with response data
+    pub fn extended(circuit_id: CircuitId, response_data: Vec<u8>) -> Self {
+        Self::circuit(circuit_id, MessageCommand::Extended, response_data)
+    }
+
+    /// Create a DESTROY message
+    pub fn destroy(circuit_id: CircuitId) -> Self {
+        Self::circuit(circuit_id, MessageCommand::Destroy, vec![])
+    }
+
+    /// Create a BEGIN message with destination address
+    pub fn begin(circuit_id: CircuitId, stream_id: StreamId, destination: Vec<u8>) -> Self {
+        Self::stream(circuit_id, stream_id, MessageCommand::Begin, destination)
+    }
+
+    /// Create a CONNECTED message
+    pub fn connected(circuit_id: CircuitId, stream_id: StreamId) -> Self {
+        Self::stream(circuit_id, stream_id, MessageCommand::Connected, vec![])
+    }
+
+    /// Create a DATA message with payload
+    pub fn data(circuit_id: CircuitId, stream_id: StreamId, payload: Vec<u8>) -> Self {
+        Self::stream(circuit_id, stream_id, MessageCommand::Data, payload)
+    }
+
+    /// Create an END message with optional reason
+    pub fn end(circuit_id: CircuitId, stream_id: StreamId, reason: Vec<u8>) -> Self {
+        Self::stream(circuit_id, stream_id, MessageCommand::End, reason)
+    }
+
+    /// Serialize to wire format bytes
     ///
     /// Format: [Length: 4B | Circuit ID: 4B | Stream ID: 2B | Command: 1B | Data]
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -139,7 +186,7 @@ impl Message {
         bytes
     }
 
-    /// Deserialize from wire format bytes (from class diagram line 318)
+    /// Deserialize from wire format bytes
     ///
     /// # Errors
     /// Returns an error if bytes are too short, contain invalid command, or have incomplete data

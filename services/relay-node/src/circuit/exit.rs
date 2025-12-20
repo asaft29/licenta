@@ -1,4 +1,4 @@
-use crate::circuit_handler::{CircuitContext, CircuitState};
+use crate::circuit::handler::{CircuitContext, CircuitState};
 use crate::keypair::KeyPair;
 use common::{
     crypto::{SessionKey, aes_decrypt, aes_encrypt, derive_session_key},
@@ -71,12 +71,10 @@ impl ExitCircuitHandler {
         );
 
         // Send CREATED response with our public key
-        Ok(Some(Message {
-            circuit_id: self.context.circuit_id,
-            stream_id: 0,
-            command: MessageCommand::Created,
-            data: self.keypair.public_key().bytes.to_vec(),
-        }))
+        Ok(Some(Message::created(
+            self.context.circuit_id,
+            self.keypair.public_key().bytes.to_vec(),
+        )))
     }
 
     /// Handle BEGIN message (client wants to connect to a destination)
@@ -98,7 +96,7 @@ impl ExitCircuitHandler {
             .ok_or_else(|| anyhow::anyhow!("No session key established"))?;
 
         // Decrypt the data to get destination
-        let decrypted = aes_decrypt(&msg.data, &session_key.forward);
+        let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
 
         // Parse destination address (format: "host:port")
         let dest_str = std::str::from_utf8(&decrypted)
@@ -141,23 +139,20 @@ impl ExitCircuitHandler {
                 );
 
                 // Send CONNECTED response
-                Ok(Some(Message {
-                    circuit_id: self.context.circuit_id,
-                    stream_id: msg.stream_id,
-                    command: MessageCommand::Connected,
-                    data: vec![],
-                }))
+                Ok(Some(Message::connected(
+                    self.context.circuit_id,
+                    msg.stream_id,
+                )))
             }
             Err(e) => {
                 error!("Exit: Failed to connect to {}: {}", dest_str, e);
 
                 // Send END message with error
-                Ok(Some(Message {
-                    circuit_id: self.context.circuit_id,
-                    stream_id: msg.stream_id,
-                    command: MessageCommand::End,
-                    data: format!("Connection failed: {}", e).into_bytes(),
-                }))
+                Ok(Some(Message::end(
+                    self.context.circuit_id,
+                    msg.stream_id,
+                    format!("Connection failed: {}", e).into_bytes(),
+                )))
             }
         }
     }
@@ -189,12 +184,7 @@ impl ExitCircuitHandler {
                                 info!("Exit: Destination closed for circuit {} stream {}", circuit_id, stream_id);
 
                                 // Send END message
-                                let end_msg = Message {
-                                    circuit_id,
-                                    stream_id,
-                                    command: MessageCommand::End,
-                                    data: vec![],
-                                };
+                                let end_msg = Message::end(circuit_id, stream_id, vec![]);
 
                                 let bytes = end_msg.to_bytes();
                                 let mut stream = prev_hop_stream.lock().await;
@@ -206,23 +196,16 @@ impl ExitCircuitHandler {
 
                                 // Encrypt with backward key (first layer - middle and entry will add more)
                                 // Safety: n is guaranteed to be <= buf.len() by read()
-                                let data_slice = match buf.get(..n) {
-                                    Some(slice) => slice,
-                                    _ => {
-                                        error!("Exit: Buffer slice out of bounds: {} for circuit {} stream {}", n, circuit_id, stream_id);
-                                        break;
-                                    }
+                                let Some(data_slice) = buf.get(..n) else {
+                                    error!("Exit: Buffer slice out of bounds: {} for circuit {} stream {}", n, circuit_id, stream_id);
+                                    break;
                                 };
+
                                 let encrypted = aes_encrypt(data_slice, &backward_key);
                                 let encrypted_len = encrypted.len();
 
                                 // Send DATA message back through circuit
-                                let data_msg = Message {
-                                    circuit_id,
-                                    stream_id,
-                                    command: MessageCommand::Data,
-                                    data: encrypted,
-                                };
+                                let data_msg = Message::data(circuit_id, stream_id, encrypted);
 
                                 let bytes = data_msg.to_bytes();
                                 let mut stream = prev_hop_stream.lock().await;
@@ -236,12 +219,11 @@ impl ExitCircuitHandler {
                                 error!("Exit: Error reading from destination for circuit {} stream {}: {}", circuit_id, stream_id, e);
 
                                 // Send END message with error
-                                let end_msg = Message {
+                                let end_msg = Message::end(
                                     circuit_id,
                                     stream_id,
-                                    command: MessageCommand::End,
-                                    data: format!("Read error: {}", e).into_bytes(),
-                                };
+                                    format!("Read error: {}", e).into_bytes(),
+                                );
 
                                 let bytes = end_msg.to_bytes();
                                 let mut stream = prev_hop_stream.lock().await;
@@ -252,12 +234,18 @@ impl ExitCircuitHandler {
                     }
 
                     // Receive data to write to destination
-                    Some(data) = dest_rx.recv() => {
-                        if let Err(e) = write_half.write_all(&data).await {
-                            error!("Exit: Error writing to destination for circuit {} stream {}: {}", circuit_id, stream_id, e);
-                            break;
+                    msg = dest_rx.recv() => {
+                        match msg {
+                            Some(data) => {
+                                if let Err(_) = write_half.write_all(&data).await {
+                                    break;
+                                }
+                            }
+                            _ => {
+                                debug!("Exit: Control channel closed, stopping stream task");
+                                break;
+                            }
                         }
-                        debug!("Exit: Wrote {} bytes to destination", data.len());
                     }
                 }
             }
@@ -284,7 +272,7 @@ impl ExitCircuitHandler {
             .ok_or_else(|| anyhow::anyhow!("No session key established"))?;
 
         // Decrypt the data (final layer)
-        let decrypted = aes_decrypt(&msg.data, &session_key.forward);
+        let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
 
         // Get the stream
         if let Some(exit_stream) = self.streams.get(&msg.stream_id) {
@@ -296,12 +284,11 @@ impl ExitCircuitHandler {
                 );
 
                 // Send END message
-                return Ok(Some(Message {
-                    circuit_id: self.context.circuit_id,
-                    stream_id: msg.stream_id,
-                    command: MessageCommand::End,
-                    data: b"Destination closed".to_vec(),
-                }));
+                return Ok(Some(Message::end(
+                    self.context.circuit_id,
+                    msg.stream_id,
+                    b"Destination closed".to_vec(),
+                )));
             }
             debug!(
                 "Exit: Queued {} bytes to destination {}",
@@ -318,12 +305,11 @@ impl ExitCircuitHandler {
             );
 
             // Send END message
-            Ok(Some(Message {
-                circuit_id: self.context.circuit_id,
-                stream_id: msg.stream_id,
-                command: MessageCommand::End,
-                data: b"Stream not found".to_vec(),
-            }))
+            Ok(Some(Message::end(
+                self.context.circuit_id,
+                msg.stream_id,
+                b"Stream not found".to_vec(),
+            )))
         }
     }
 
@@ -345,12 +331,11 @@ impl ExitCircuitHandler {
         }
 
         // Acknowledge with END
-        Ok(Some(Message {
-            circuit_id: self.context.circuit_id,
-            stream_id: msg.stream_id,
-            command: MessageCommand::End,
-            data: vec![],
-        }))
+        Ok(Some(Message::end(
+            self.context.circuit_id,
+            msg.stream_id,
+            vec![],
+        )))
     }
 
     /// Handle an incoming message on this circuit

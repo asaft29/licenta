@@ -62,7 +62,7 @@ impl RelayConfig {
                     allowed_ips: vec![],
                     blocked_ips: vec![
                         IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), // localhost
-                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),   // private networks
+                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),  // private networks
                         IpAddr::V4(Ipv4Addr::new(172, 16, 0, 0)),
                         IpAddr::V4(Ipv4Addr::new(192, 168, 0, 0)),
                     ],

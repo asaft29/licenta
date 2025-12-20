@@ -1,19 +1,15 @@
-mod circuit_handler;
+mod circuit;
 mod config;
-mod entry_handler;
-mod exit_handler;
 mod keypair;
-mod middle_handler;
 
 use anyhow::Result;
-use circuit_handler::{CircuitHandler, CircuitManager};
+use circuit::{
+    CircuitHandler, CircuitRegistry, EntryCircuitHandler, ExitCircuitHandler, MiddleCircuitHandler,
+};
 use clap::Parser;
 use common::{NodeDescriptor, protocol::Message};
 use config::RelayConfig;
-use entry_handler::EntryCircuitHandler;
-use exit_handler::ExitCircuitHandler;
 use keypair::KeyPair;
-use middle_handler::MiddleCircuitHandler;
 use reqwest::Client;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{
@@ -75,8 +71,8 @@ async fn main() -> Result<()> {
     // Register with directory service
     register_with_directory(&http_client, &config.directory_url, &descriptor).await?;
 
-    // Create circuit manager
-    let circuit_manager = Arc::new(Mutex::new(CircuitManager::new()));
+    // Create circuit registry (local state for circuits passing through this node)
+    let circuit_registry = Arc::new(Mutex::new(CircuitRegistry::new()));
 
     // Start TCP listener
     let listener = TcpListener::bind(bind_addr).await?;
@@ -93,7 +89,7 @@ async fn main() -> Result<()> {
     // Spawn connection handler task
     let connection_handle = tokio::spawn(accept_connections(
         listener,
-        circuit_manager,
+        circuit_registry,
         keypair,
         config.node_type,
     ));
@@ -194,12 +190,11 @@ async fn heartbeat_loop(
         let url = format!("{}/api/nodes/{}/heartbeat", directory_url, node_id);
 
         match client.post(&url).send().await {
+            Ok(response) if response.status().is_success() => {
+                info!("Heartbeat sent successfully");
+            }
             Ok(response) => {
-                if response.status().is_success() {
-                    info!("Heartbeat sent successfully");
-                } else {
-                    warn!("Heartbeat failed with status: {}", response.status());
-                }
+                warn!("Heartbeat failed with status: {}", response.status());
             }
             Err(e) => {
                 error!("Failed to send heartbeat: {}", e);
@@ -211,7 +206,7 @@ async fn heartbeat_loop(
 /// Accept incoming TCP connections
 async fn accept_connections(
     listener: TcpListener,
-    circuit_manager: Arc<Mutex<CircuitManager>>,
+    circuit_registry: Arc<Mutex<CircuitRegistry>>,
     keypair: KeyPair,
     node_type: common::NodeType,
 ) {
@@ -221,9 +216,9 @@ async fn accept_connections(
                 info!("Accepted connection from {}", addr);
 
                 // Spawn a task to handle this connection
-                let manager = circuit_manager.clone();
+                let registry = circuit_registry.clone();
                 let kp = keypair.clone();
-                tokio::spawn(handle_connection(stream, addr, manager, kp, node_type));
+                tokio::spawn(handle_connection(stream, addr, registry, kp, node_type));
             }
             Err(e) => {
                 error!("Failed to accept connection: {}", e);
@@ -236,7 +231,7 @@ async fn accept_connections(
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     addr: SocketAddr,
-    circuit_manager: Arc<Mutex<CircuitManager>>,
+    circuit_registry: Arc<Mutex<CircuitRegistry>>,
     keypair: KeyPair,
     node_type: common::NodeType,
 ) {
@@ -260,117 +255,115 @@ async fn handle_connection(
                 let circuit_id = msg.circuit_id;
                 let command = msg.command;
 
-                // Handle CREATE message specially (creates new circuit)
-                if command == common::protocol::MessageCommand::Create {
-                    // Create handler based on node type
-                    let mut handler = match node_type {
-                        common::NodeType::Entry => {
-                            let entry_handler =
-                                EntryCircuitHandler::new(circuit_id, keypair.clone());
-                            CircuitHandler::Entry(entry_handler)
-                        }
-                        common::NodeType::Middle => {
-                            let middle_handler =
-                                MiddleCircuitHandler::new(circuit_id, keypair.clone());
-                            CircuitHandler::Middle(middle_handler)
-                        }
-                        common::NodeType::Exit => {
-                            let exit_handler = ExitCircuitHandler::new(circuit_id, keypair.clone());
-                            CircuitHandler::Exit(exit_handler)
-                        }
-                    };
+                // Handle message based on type
+                match command {
+                    common::protocol::MessageCommand::Create => {
+                        // Create handler based on node type
+                        let mut handler = match node_type {
+                            common::NodeType::Entry => CircuitHandler::Entry(
+                                EntryCircuitHandler::new(circuit_id, keypair.clone()),
+                            ),
+                            common::NodeType::Middle => CircuitHandler::Middle(
+                                MiddleCircuitHandler::new(circuit_id, keypair.clone()),
+                            ),
+                            common::NodeType::Exit => CircuitHandler::Exit(
+                                ExitCircuitHandler::new(circuit_id, keypair.clone()),
+                            ),
+                        };
 
-                    // Handle CREATE message
-                    match handler.handle_message(msg, Some(stream_arc.clone())).await {
-                        Ok(Some(response)) => {
-                            // Send CREATED response
-                            let bytes = response.to_bytes();
-                            let mut stream = stream_arc.lock().await;
-                            if let Err(e) = stream.write_all(&bytes).await {
-                                error!("Failed to send CREATED response: {}", e);
-                                break;
-                            }
-                            drop(stream);
-                            info!("Sent CREATED response for circuit {}", circuit_id);
-
-                            // Add circuit to manager
-                            let mut manager = circuit_manager.lock().await;
-                            manager.add_circuit(circuit_id, handler);
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            error!("Failed to handle CREATE: {}", e);
-                            break;
-                        }
-                    }
-                } else {
-                    // Route to existing circuit
-                    let mut manager = circuit_manager.lock().await;
-
-                    let should_spawn_reader = matches!(
-                        command,
-                        common::protocol::MessageCommand::Extended
-                            | common::protocol::MessageCommand::Extend
-                    );
-
-                    match manager.handle_message(msg, Some(stream_arc.clone())).await {
-                        Ok(Some(response)) => {
-                            // Send response
-                            let bytes = response.to_bytes();
-                            let mut stream = stream_arc.lock().await;
-                            if let Err(e) = stream.write_all(&bytes).await {
-                                error!("Failed to send response: {}", e);
+                        // Handle CREATE message
+                        match handler.handle_message(msg, Some(stream_arc.clone())).await {
+                            Ok(Some(response)) => {
+                                // Send CREATED response
+                                let bytes = response.to_bytes();
+                                let mut stream = stream_arc.lock().await;
+                                if let Err(e) = stream.write_all(&bytes).await {
+                                    error!("Failed to send CREATED response: {}", e);
+                                    break;
+                                }
                                 drop(stream);
-                                drop(manager);
+                                info!("Sent CREATED response for circuit {}", circuit_id);
+
+                                // Add circuit to registry
+                                let mut registry = circuit_registry.lock().await;
+                                registry.add_circuit(circuit_id, handler);
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                error!("Failed to handle CREATE: {}", e);
                                 break;
                             }
-                            drop(stream);
-
-                            if should_spawn_reader
-                                && let Some(handler) = manager.get_circuit_mut(circuit_id)
-                                && let Some(task_handle) = handler.spawn_nexthop_reader(
-                                    circuit_manager.clone(),
-                                    stream_arc.clone(),
-                                )
-                            {
-                                info!("Spawned background reader for circuit {}", circuit_id);
-
-                                // Optionally track the task handle for cleanup
-                                // For now, we just let it run until completion
-                                tokio::spawn(async move {
-                                    if let Err(e) = task_handle.await {
-                                        error!("Background reader task failed: {}", e);
-                                    }
-                                });
-                            }
-                        }
-                        Ok(None) => {
-                            // No response to send
-
-                            // Still might need to spawn background reader for EXTEND
-                            if should_spawn_reader
-                                && let Some(handler) = manager.get_circuit_mut(circuit_id)
-                                && let Some(task_handle) = handler.spawn_nexthop_reader(
-                                    circuit_manager.clone(),
-                                    stream_arc.clone(),
-                                )
-                            {
-                                info!("Spawned background reader for circuit {}", circuit_id);
-
-                                tokio::spawn(async move {
-                                    if let Err(e) = task_handle.await {
-                                        error!("Background reader task failed: {}", e);
-                                    }
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to handle message: {}", e);
-                            drop(manager);
-                            break;
                         }
                     }
-                    drop(manager);
+                    _ => {
+                        // Route to existing circuit
+                        let mut registry = circuit_registry.lock().await;
+
+                        let should_spawn_reader = matches!(
+                            command,
+                            common::protocol::MessageCommand::Extended
+                                | common::protocol::MessageCommand::Extend
+                        );
+
+                        match registry.handle_message(msg, Some(stream_arc.clone())).await {
+                            Ok(Some(response)) => {
+                                // Send response
+                                let bytes = response.to_bytes();
+                                let mut stream = stream_arc.lock().await;
+                                if let Err(e) = stream.write_all(&bytes).await {
+                                    error!("Failed to send response: {}", e);
+                                    drop(stream);
+                                    drop(registry);
+                                    break;
+                                }
+                                drop(stream);
+
+                                if should_spawn_reader
+                                    && let Some(handler) = registry.get_circuit_mut(circuit_id)
+                                    && let Some(task_handle) = handler.spawn_nexthop_reader(
+                                        circuit_registry.clone(),
+                                        stream_arc.clone(),
+                                    )
+                                {
+                                    info!("Spawned background reader for circuit {}", circuit_id);
+
+                                    // Optionally track the task handle for cleanup
+                                    // For now, we just let it run until completion
+                                    tokio::spawn(async move {
+                                        if let Err(e) = task_handle.await {
+                                            error!("Background reader task failed: {}", e);
+                                        }
+                                    });
+                                }
+                            }
+                            Ok(None) => {
+                                // No response to send
+
+                                // Still might need to spawn background reader for EXTEND
+                                if should_spawn_reader
+                                    && let Some(handler) = registry.get_circuit_mut(circuit_id)
+                                    && let Some(task_handle) = handler.spawn_nexthop_reader(
+                                        circuit_registry.clone(),
+                                        stream_arc.clone(),
+                                    )
+                                {
+                                    info!("Spawned background reader for circuit {}", circuit_id);
+
+                                    tokio::spawn(async move {
+                                        if let Err(e) = task_handle.await {
+                                            error!("Background reader task failed: {}", e);
+                                        }
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to handle message: {}", e);
+                                drop(registry);
+                                break;
+                            }
+                        }
+                        drop(registry);
+                    }
                 }
             }
             Ok(None) => {

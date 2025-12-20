@@ -6,7 +6,7 @@ mod routes;
 
 use registry::NodeRegistry;
 use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

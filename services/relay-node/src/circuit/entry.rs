@@ -1,4 +1,4 @@
-use crate::circuit_handler::{CircuitContext, CircuitState, NextHop};
+use crate::circuit::handler::{CircuitContext, CircuitState, NextHop};
 use crate::keypair::KeyPair;
 use common::{
     crypto::{SessionKey, aes_decrypt, aes_encrypt, derive_session_key},
@@ -63,12 +63,10 @@ impl EntryCircuitHandler {
         info!("Entry: Circuit {} activated", self.context.circuit_id);
 
         // Send CREATED response with our public key
-        let response = Message {
-            circuit_id: self.context.circuit_id,
-            stream_id: 0,
-            command: MessageCommand::Created,
-            data: self.keypair.public_key().bytes.to_vec(),
-        };
+        let response = Message::created(
+            self.context.circuit_id,
+            self.keypair.public_key().bytes.to_vec(),
+        );
 
         Ok(Some(response))
     }
@@ -87,7 +85,7 @@ impl EntryCircuitHandler {
             .as_ref()
             .ok_or(anyhow::anyhow!("Circuit not yet established"))?;
 
-        let decrypted = aes_decrypt(&msg.data, &session_key.forward);
+        let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
 
         // Parse next hop address from decrypted data
         // Format: [next_hop_address (variable)] [next_hop_public_key (32 bytes)]
@@ -110,29 +108,50 @@ impl EntryCircuitHandler {
         info!("Entry: Extending to next hop: {}", addr_str);
 
         // Connect to next hop
-        let next_hop_stream = TcpStream::connect(addr_str).await?;
-        self.next_hop = Some(NextHop::new(next_hop_stream));
+        let mut next_hop_stream = TcpStream::connect(addr_str).await?;
 
         info!("Entry: Connected to next hop {}", addr_str);
 
-        // TODO: Forward CREATE message to next hop
-        // For now, just send EXTENDED response
+        // Extract the next hop's public key and client's onion-encrypted data
+        // The remaining data after the address contains the CREATE payload for next hop
+        let create_payload_start = addr_end + 1; // Skip null terminator
+        let create_payload = decrypted
+            .get(create_payload_start..)
+            .ok_or(anyhow::anyhow!("Missing CREATE payload for next hop"))?;
 
-        let response = Message {
-            circuit_id: self.context.circuit_id,
-            stream_id: 0,
-            command: MessageCommand::Extended,
-            data: vec![], // In production, include handshake data from next hop
-        };
+        // Forward CREATE message to next hop
+        let create_msg = Message::create(self.context.circuit_id, create_payload.to_vec());
+
+        let create_bytes = create_msg.to_bytes();
+        next_hop_stream.write_all(&create_bytes).await?;
+        debug!("Entry: Sent CREATE to next hop");
+
+        // Wait for CREATED response from next hop
+        let created_msg = Message::from_stream(&mut next_hop_stream)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Next hop closed connection waiting for CREATED"))?;
+
+        if created_msg.command != MessageCommand::Created {
+            return Err(anyhow::anyhow!(
+                "Expected CREATED from next hop, got {:?}",
+                created_msg.command
+            ));
+        }
+
+        info!("Entry: Received CREATED from next hop");
+
+        // Store the next hop connection
+        self.next_hop = Some(NextHop::new(next_hop_stream));
+
+        // Send EXTENDED response to client with next hop's CREATED data
+        let response = Message::extended(
+            self.context.circuit_id,
+            created_msg.data, // Include next hop's public key
+        );
 
         // Encrypt response for client
         let encrypted_data = aes_encrypt(&response.data, &session_key.backward);
-        let encrypted_response = Message {
-            circuit_id: response.circuit_id,
-            stream_id: response.stream_id,
-            command: response.command,
-            data: encrypted_data,
-        };
+        let encrypted_response = Message::extended(self.context.circuit_id, encrypted_data);
 
         Ok(Some(encrypted_response))
     }
@@ -151,24 +170,18 @@ impl EntryCircuitHandler {
             .ok_or(anyhow::anyhow!("Circuit not yet established"))?;
 
         // Decrypt one layer (forward direction: client -> entry -> middle)
-        let decrypted = aes_decrypt(&msg.data, &session_key.forward);
+        let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
 
         // Forward to next hop if it exists
         if let Some(next_hop) = &mut self.next_hop {
-            let forward_msg = Message {
-                circuit_id: msg.circuit_id,
-                stream_id: msg.stream_id,
-                command: msg.command,
-                data: decrypted,
-            };
+            let forward_msg = Message::new(msg.circuit_id, msg.stream_id, msg.command, decrypted);
 
             let serialized = forward_msg.to_bytes();
             next_hop.write.write_all(&serialized).await?;
 
             debug!("Entry: Forwarded {} bytes to next hop", serialized.len());
 
-            // TODO: Read response from next hop and encrypt it with backward key
-            // This requires a background task or refactoring to handle bidirectional flow
+            // Response from next hop is handled by spawn_nexthop_reader background task
         } else {
             error!(
                 "Entry: No next hop configured for circuit {}",
@@ -197,12 +210,12 @@ impl EntryCircuitHandler {
         // Encrypt one layer for backward direction (middle -> entry -> client)
         let encrypted = aes_encrypt(&msg.data, &session_key.backward);
 
-        Ok(Some(Message {
-            circuit_id: msg.circuit_id,
-            stream_id: msg.stream_id,
-            command: msg.command,
-            data: encrypted,
-        }))
+        Ok(Some(Message::new(
+            msg.circuit_id,
+            msg.stream_id,
+            msg.command,
+            encrypted,
+        )))
     }
 
     /// Handle an incoming message on this circuit
@@ -252,7 +265,7 @@ impl EntryCircuitHandler {
     /// Returns the task handle
     pub fn spawn_nexthop_reader(
         &mut self,
-        circuit_manager: Arc<Mutex<crate::circuit_handler::CircuitManager>>,
+        circuit_registry: Arc<Mutex<crate::circuit::handler::CircuitRegistry>>,
         client_stream: Arc<Mutex<TcpStream>>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let circuit_id = self.context.circuit_id;
@@ -275,10 +288,10 @@ impl EntryCircuitHandler {
                         );
 
                         let response = {
-                            let mut manager = circuit_manager.lock().await;
-                            match manager.handle_backward_message(msg).await {
+                            let mut registry = circuit_registry.lock().await;
+                            match registry.handle_backward_message(msg).await {
                                 Ok(Some(response)) => response,
-                                Ok(None) => continue,
+                                Ok(_) => continue,
                                 Err(e) => {
                                     error!("Entry: Error handling backward message: {}", e);
                                     break;
@@ -294,7 +307,7 @@ impl EntryCircuitHandler {
                         }
                         debug!("Entry: Sent backward message to client");
                     }
-                    Ok(None) => {
+                    Ok(_) => {
                         info!(
                             "Entry: Next hop closed connection for circuit {}",
                             circuit_id

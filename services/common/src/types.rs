@@ -58,10 +58,10 @@ impl PublicKey {
 
         let mut bytes = [0u8; 32];
         for (i, byte) in bytes.iter_mut().enumerate() {
-            let hex_slice = hex.get(i * 2..i * 2 + 2)
+            let hex_slice = hex
+                .get(i * 2..i * 2 + 2)
                 .ok_or_else(|| format!("Invalid hex slice at position {}", i))?;
-            *byte = u8::from_str_radix(hex_slice, 16)
-                .map_err(|e| format!("Invalid hex: {}", e))?;
+            *byte = u8::from_str_radix(hex_slice, 16).map_err(|e| format!("Invalid hex: {}", e))?;
         }
 
         Ok(Self { bytes })
@@ -177,7 +177,7 @@ impl NodeDescriptor {
         }
     }
 
-    /// Serialize to JSON 
+    /// Serialize to JSON
     ///
     /// # Errors
     /// Returns a serde_json error if serialization fails
@@ -185,7 +185,7 @@ impl NodeDescriptor {
         serde_json::to_string(self)
     }
 
-    /// Deserialize from JSON 
+    /// Deserialize from JSON
     ///
     /// # Errors
     /// Returns a serde_json error if JSON is invalid or doesn't match the schema
