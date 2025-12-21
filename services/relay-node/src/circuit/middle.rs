@@ -37,7 +37,6 @@ impl MiddleCircuitHandler {
             self.context.circuit_id
         );
 
-        // Extract the next hop's public key (32 bytes)
         if msg.data.len() < 32 {
             return Err(anyhow::anyhow!("EXTENDED message too short"));
         }
@@ -54,10 +53,6 @@ impl MiddleCircuitHandler {
             self.context.circuit_id
         );
 
-        // The session key with the previous hop should already be established
-        // We're just acknowledging that we've connected to the next hop
-
-        // Just relay the EXTENDED message back
         Ok(Some(msg))
     }
 
@@ -68,11 +63,6 @@ impl MiddleCircuitHandler {
             self.context.circuit_id
         );
 
-        // EXTEND message format:
-        // - Next hop address (variable length, null-terminated string)
-        // - Next hop public key (32 bytes)
-
-        // Parse the address
         let null_pos = msg
             .data
             .iter()
@@ -86,7 +76,6 @@ impl MiddleCircuitHandler {
         )?;
         let addr: std::net::SocketAddr = addr_str.parse()?;
 
-        // Extract client's DH public key (after null + 1 byte)
         let key_start = null_pos + 1;
         if msg.data.len() < key_start + 32 {
             return Err(anyhow::anyhow!("EXTEND message missing public key"));
@@ -104,11 +93,9 @@ impl MiddleCircuitHandler {
             addr, self.context.circuit_id
         );
 
-        // Connect to next hop
         let mut stream = TcpStream::connect(addr).await?;
         debug!("Middle: Connected to next hop at {}", addr);
 
-        // Send CREATE message to next hop with our public key
         let create_msg = Message::create(
             self.context.circuit_id,
             self.keypair.public_key().bytes.to_vec(),
@@ -118,7 +105,6 @@ impl MiddleCircuitHandler {
         stream.write_all(&create_bytes).await?;
         debug!("Middle: Sent CREATE to next hop");
 
-        // Wait for CREATED response
         let created_msg = Message::from_stream(&mut stream)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Connection closed waiting for CREATED"))?;
@@ -130,7 +116,6 @@ impl MiddleCircuitHandler {
             ));
         }
 
-        // Extract next hop's public key from CREATED
         if created_msg.data.len() < 32 {
             return Err(anyhow::anyhow!("CREATED response too short"));
         }
@@ -143,7 +128,6 @@ impl MiddleCircuitHandler {
                 .ok_or(anyhow::anyhow!("CREATED response too short"))?,
         );
 
-        // Perform DH with next hop
         let shared_secret = self.keypair.diffie_hellman(&next_public);
         let _session_key = derive_session_key(&shared_secret);
 
@@ -152,13 +136,8 @@ impl MiddleCircuitHandler {
             self.context.circuit_id
         );
 
-        // Store next hop connection
         self.next_hop = Some(NextHop::new(stream));
 
-        // We don't activate our context here - that was done when we received CREATE
-        // We just store the next hop connection
-
-        // Send EXTENDED back to previous hop with next hop's public key
         Ok(Some(Message::extended(
             self.context.circuit_id,
             next_public.to_vec(),
@@ -172,7 +151,6 @@ impl MiddleCircuitHandler {
             self.context.circuit_id
         );
 
-        // Extract client's public key (32 bytes)
         if msg.data.len() < 32 {
             return Err(anyhow::anyhow!("CREATE message too short"));
         }
@@ -184,7 +162,6 @@ impl MiddleCircuitHandler {
                 .ok_or(anyhow::anyhow!("CREATE message too short"))?,
         );
 
-        // Perform DH key exchange with previous hop
         let shared_secret = self.keypair.diffie_hellman(&client_public);
         let session_key = derive_session_key(&shared_secret);
         self.context.activate(session_key.clone());
@@ -194,7 +171,6 @@ impl MiddleCircuitHandler {
             self.context.circuit_id
         );
 
-        // Send CREATED response with our public key
         Ok(Some(Message::created(
             self.context.circuit_id,
             self.keypair.public_key().bytes.to_vec(),
@@ -210,25 +186,20 @@ impl MiddleCircuitHandler {
             self.context.circuit_id
         );
 
-        // Get session key
         let session_key = self
             .context
             .session_key
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No session key established"))?;
 
-        // Decrypt one layer (forward direction: entry -> middle -> exit)
         let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
 
-        // Forward to next hop
         if let Some(next_hop) = &mut self.next_hop {
             let relay_msg = Message::data(msg.circuit_id, msg.stream_id, decrypted);
 
             let bytes = relay_msg.to_bytes();
             next_hop.write.write_all(&bytes).await?;
             debug!("Middle: Forwarded relay cell to next hop");
-
-            // Response from next hop is handled by spawn_nexthop_reader background task
         } else {
             error!(
                 "Middle: No next hop configured for circuit {}",
@@ -236,7 +207,7 @@ impl MiddleCircuitHandler {
             );
         }
 
-        Ok(None) // No immediate response to previous hop
+        Ok(None)
     }
 
     /// Handle backward relay cell (data coming back from exit node)
@@ -247,14 +218,12 @@ impl MiddleCircuitHandler {
             self.context.circuit_id
         );
 
-        // Get session key
         let session_key = self
             .context
             .session_key
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No session key established"))?;
 
-        // Encrypt one layer for backward direction (exit -> middle -> entry)
         let encrypted = aes_encrypt(&msg.data, &session_key.backward);
 
         Ok(Some(Message::new(
@@ -318,7 +287,6 @@ impl MiddleCircuitHandler {
     ) -> Option<tokio::task::JoinHandle<()>> {
         let circuit_id = self.context.circuit_id;
 
-        // Take the read half from next_hop
         let mut read_half = self.next_hop.as_mut()?.take_read()?;
 
         info!(
@@ -328,7 +296,6 @@ impl MiddleCircuitHandler {
 
         Some(tokio::spawn(async move {
             loop {
-                // Read message from next hop (exit node)
                 match Message::from_stream(&mut read_half).await {
                     Ok(Some(msg)) => {
                         debug!(
@@ -336,7 +303,6 @@ impl MiddleCircuitHandler {
                             circuit_id
                         );
 
-                        // Process through circuit registry to re-encrypt
                         let response = {
                             let mut registry = circuit_registry.lock().await;
                             match registry.handle_backward_message(msg).await {
@@ -349,7 +315,6 @@ impl MiddleCircuitHandler {
                             }
                         };
 
-                        // Send re-encrypted response back to previous hop (entry)
                         let bytes = response.to_bytes();
                         let mut stream = prev_hop_stream.lock().await;
                         if let Err(e) = stream.write_all(&bytes).await {

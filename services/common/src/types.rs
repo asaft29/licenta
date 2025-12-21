@@ -116,23 +116,18 @@ impl ExitPolicy {
         let port = addr.port();
         let ip = addr.ip();
 
-        // Check blocked IPs first
         if self.blocked_ips.contains(&ip) {
             return false;
         }
 
-        // Check allowed IPs (if list is non-empty, must be in list)
         if !self.allowed_ips.is_empty() && !self.allowed_ips.contains(&ip) {
             return false;
         }
 
-        // Check blocked ports
         if self.blocked_ports.contains(&port) {
             return false;
         }
 
-        // If allowed_ports is empty, allow all ports (except blocked)
-        // If allowed_ports has entries, port must be in the list
         if self.allowed_ports.is_empty() {
             true
         } else {

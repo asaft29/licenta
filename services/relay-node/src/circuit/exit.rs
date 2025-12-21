@@ -17,8 +17,8 @@ type DestinationTx = tokio::sync::mpsc::UnboundedSender<Vec<u8>>;
 /// Stream state for exit node
 struct ExitStream {
     destination: String,
-    dest_tx: DestinationTx, // Channel to send data to destination
-    _task_handle: tokio::task::JoinHandle<()>, // Background task reading from destination
+    dest_tx: DestinationTx,
+    _task_handle: tokio::task::JoinHandle<()>,
 }
 
 /// Exit node circuit handler
@@ -48,7 +48,6 @@ impl ExitCircuitHandler {
             self.context.circuit_id
         );
 
-        // Extract client's public key (32 bytes)
         if msg.data.len() < 32 {
             return Err(anyhow::anyhow!("CREATE message too short"));
         }
@@ -60,7 +59,6 @@ impl ExitCircuitHandler {
                 .ok_or(anyhow::anyhow!("CREATE message too short"))?,
         );
 
-        // Perform DH key exchange
         let shared_secret = self.keypair.diffie_hellman(&client_public);
         let session_key = derive_session_key(&shared_secret);
         self.context.activate(session_key.clone());
@@ -70,7 +68,6 @@ impl ExitCircuitHandler {
             self.context.circuit_id
         );
 
-        // Send CREATED response with our public key
         Ok(Some(Message::created(
             self.context.circuit_id,
             self.keypair.public_key().bytes.to_vec(),
@@ -88,27 +85,23 @@ impl ExitCircuitHandler {
             self.context.circuit_id, msg.stream_id
         );
 
-        // Get session key
         let session_key = self
             .context
             .session_key
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No session key established"))?;
 
-        // Decrypt the data to get destination
         let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
 
-        // Parse destination address (format: "host:port")
         let dest_str = std::str::from_utf8(&decrypted)
             .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in destination: {}", e))?
-            .trim_end_matches('\0'); // Remove null terminator if present
+            .trim_end_matches('\0');
 
         info!(
             "Exit: Connecting to destination {} for circuit {} stream {}",
             dest_str, self.context.circuit_id, msg.stream_id
         );
 
-        // Connect to destination
         match TcpStream::connect(dest_str).await {
             Ok(destination_stream) => {
                 info!(
@@ -116,10 +109,8 @@ impl ExitCircuitHandler {
                     dest_str, self.context.circuit_id, msg.stream_id
                 );
 
-                // Create channel for sending data to destination
                 let (dest_tx, dest_rx) = tokio::sync::mpsc::unbounded_channel();
 
-                // Spawn background tasks for bidirectional communication
                 let task_handle = self.spawn_stream_tasks(
                     msg.stream_id,
                     destination_stream,
@@ -128,7 +119,6 @@ impl ExitCircuitHandler {
                     dest_rx,
                 );
 
-                // Store the stream state
                 self.streams.insert(
                     msg.stream_id,
                     ExitStream {
@@ -138,7 +128,6 @@ impl ExitCircuitHandler {
                     },
                 );
 
-                // Send CONNECTED response
                 Ok(Some(Message::connected(
                     self.context.circuit_id,
                     msg.stream_id,
@@ -147,7 +136,6 @@ impl ExitCircuitHandler {
             Err(e) => {
                 error!("Exit: Failed to connect to {}: {}", dest_str, e);
 
-                // Send END message with error
                 Ok(Some(Message::end(
                     self.context.circuit_id,
                     msg.stream_id,
@@ -168,7 +156,6 @@ impl ExitCircuitHandler {
     ) -> tokio::task::JoinHandle<()> {
         let circuit_id = self.context.circuit_id;
 
-        // Split destination stream
         let (mut read_half, mut write_half) = tokio::io::split(destination_stream);
 
         tokio::spawn(async move {
@@ -176,14 +163,11 @@ impl ExitCircuitHandler {
 
             loop {
                 tokio::select! {
-                    // Read from destination and send back through circuit
                     read_result = read_half.read(&mut buf) => {
                         match read_result {
                             Ok(0) => {
-                                // Connection closed
                                 info!("Exit: Destination closed for circuit {} stream {}", circuit_id, stream_id);
 
-                                // Send END message
                                 let end_msg = Message::end(circuit_id, stream_id, vec![]);
 
                                 let bytes = end_msg.to_bytes();
@@ -194,8 +178,6 @@ impl ExitCircuitHandler {
                             Ok(n) => {
                                 debug!("Exit: Read {} bytes from destination for circuit {} stream {}", n, circuit_id, stream_id);
 
-                                // Encrypt with backward key (first layer - middle and entry will add more)
-                                // Safety: n is guaranteed to be <= buf.len() by read()
                                 let Some(data_slice) = buf.get(..n) else {
                                     error!("Exit: Buffer slice out of bounds: {} for circuit {} stream {}", n, circuit_id, stream_id);
                                     break;
@@ -204,7 +186,6 @@ impl ExitCircuitHandler {
                                 let encrypted = aes_encrypt(data_slice, &backward_key);
                                 let encrypted_len = encrypted.len();
 
-                                // Send DATA message back through circuit
                                 let data_msg = Message::data(circuit_id, stream_id, encrypted);
 
                                 let bytes = data_msg.to_bytes();
@@ -218,7 +199,6 @@ impl ExitCircuitHandler {
                             Err(e) => {
                                 error!("Exit: Error reading from destination for circuit {} stream {}: {}", circuit_id, stream_id, e);
 
-                                // Send END message with error
                                 let end_msg = Message::end(
                                     circuit_id,
                                     stream_id,
@@ -233,7 +213,6 @@ impl ExitCircuitHandler {
                         }
                     }
 
-                    // Receive data to write to destination
                     msg = dest_rx.recv() => {
                         match msg {
                             Some(data) => {
@@ -264,26 +243,21 @@ impl ExitCircuitHandler {
             self.context.circuit_id, msg.stream_id
         );
 
-        // Get session key
         let session_key = self
             .context
             .session_key
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No session key established"))?;
 
-        // Decrypt the data (final layer)
         let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
 
-        // Get the stream
         if let Some(exit_stream) = self.streams.get(&msg.stream_id) {
-            // Send decrypted data to destination via channel
             if exit_stream.dest_tx.send(decrypted.clone()).is_err() {
                 error!(
                     "Exit: Destination task closed for circuit {} stream {}",
                     self.context.circuit_id, msg.stream_id
                 );
 
-                // Send END message
                 return Ok(Some(Message::end(
                     self.context.circuit_id,
                     msg.stream_id,
@@ -296,7 +270,6 @@ impl ExitCircuitHandler {
                 exit_stream.destination
             );
 
-            // Background task will handle responses
             Ok(None)
         } else {
             error!(
@@ -304,7 +277,6 @@ impl ExitCircuitHandler {
                 msg.stream_id, self.context.circuit_id
             );
 
-            // Send END message
             Ok(Some(Message::end(
                 self.context.circuit_id,
                 msg.stream_id,
@@ -320,7 +292,6 @@ impl ExitCircuitHandler {
             self.context.circuit_id, msg.stream_id
         );
 
-        // Remove and close the stream (task will be aborted when ExitStream is dropped)
         if let Some(exit_stream) = self.streams.remove(&msg.stream_id) {
             info!("Exit: Closed connection to {}", exit_stream.destination);
         } else {
@@ -330,7 +301,6 @@ impl ExitCircuitHandler {
             );
         }
 
-        // Acknowledge with END
         Ok(Some(Message::end(
             self.context.circuit_id,
             msg.stream_id,
@@ -387,6 +357,6 @@ impl ExitCircuitHandler {
     /// Close this circuit and all streams
     pub fn close(&mut self) {
         self.context.close();
-        self.streams.clear(); // This will drop channels and abort all background tasks
+        self.streams.clear();
     }
 }

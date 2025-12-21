@@ -88,10 +88,7 @@ impl CircuitHandler {
         match self {
             CircuitHandler::Entry(handler) => handler.handle_backward_relay(msg).await,
             CircuitHandler::Middle(handler) => handler.handle_backward_relay(msg).await,
-            CircuitHandler::Exit(_) => {
-                // Exit nodes don't handle backward relay - they originate backward messages
-                Ok(Some(msg))
-            }
+            CircuitHandler::Exit(_) => Ok(Some(msg)),
         }
     }
 
@@ -108,7 +105,7 @@ impl CircuitHandler {
             CircuitHandler::Middle(handler) => {
                 handler.spawn_nexthop_reader(circuit_registry, client_stream)
             }
-            CircuitHandler::Exit(_) => None, // Exit nodes don't have next hops to read from
+            CircuitHandler::Exit(_) => None,
         }
     }
 }
@@ -164,14 +161,11 @@ impl CircuitRegistry {
     ) -> anyhow::Result<Option<Message>> {
         let circuit_id = msg.circuit_id;
 
-        // Check if circuit exists
         if let Some(handler) = self.get_circuit_mut(circuit_id) {
             handler.handle_message(msg, prev_hop_stream).await
         } else {
-            // Circuit doesn't exist - might be a CREATE message
             if msg.command == MessageCommand::Create {
-                // CREATE message should be handled by creating a new circuit
-                Ok(None) // Will be handled by the specific node type
+                Ok(None)
             } else {
                 Err(anyhow::anyhow!("Circuit {} not found", circuit_id))
             }
@@ -185,7 +179,6 @@ impl CircuitRegistry {
     ) -> anyhow::Result<Option<Message>> {
         let circuit_id = msg.circuit_id;
 
-        // Get the circuit handler
         if let Some(handler) = self.get_circuit_mut(circuit_id) {
             handler.handle_backward_relay(msg).await
         } else {
@@ -238,7 +231,7 @@ impl CircuitContext {
 /// Split into read and write halves for bidirectional communication
 pub struct NextHop {
     pub write: WriteHalf<TcpStream>,
-    pub read: Option<ReadHalf<TcpStream>>, // Option so we can take ownership for background task
+    pub read: Option<ReadHalf<TcpStream>>,
 }
 
 impl NextHop {

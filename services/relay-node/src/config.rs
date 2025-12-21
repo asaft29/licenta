@@ -47,7 +47,6 @@ impl RelayConfig {
     pub fn exit_policy(&self) -> Option<ExitPolicy> {
         if self.node_type == NodeType::Exit {
             Some(if self.exit_allow_all {
-                // Allow all traffic
                 ExitPolicy {
                     allowed_ports: vec![],
                     blocked_ports: vec![],
@@ -55,14 +54,13 @@ impl RelayConfig {
                     blocked_ips: vec![],
                 }
             } else {
-                // Default policy: allow common web ports, block SMTP and privileged ports
                 ExitPolicy {
                     allowed_ports: vec![80, 443, 8080, 8443],
-                    blocked_ports: vec![25, 465, 587], // SMTP ports
+                    blocked_ports: vec![25, 465, 587],
                     allowed_ips: vec![],
                     blocked_ips: vec![
-                        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), // localhost
-                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),  // private networks
+                        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),
                         IpAddr::V4(Ipv4Addr::new(172, 16, 0, 0)),
                         IpAddr::V4(Ipv4Addr::new(192, 168, 0, 0)),
                     ],

@@ -17,12 +17,10 @@ impl KeyPair {
         let secret = StaticSecret::random_from_rng(OsRng);
         let public_x25519 = X25519PublicKey::from(&secret);
 
-        // Convert X25519 public key to our PublicKey format
         let public = PublicKey {
             bytes: *public_x25519.as_bytes(),
         };
 
-        // Store the secret bytes for later use
         let secret_bytes = secret.to_bytes();
 
         Self {
@@ -56,11 +54,9 @@ impl KeyPair {
     pub fn diffie_hellman(&self, their_public: &[u8; 32]) -> [u8; 32] {
         let their_public_key = X25519PublicKey::from(*their_public);
 
-        // Recreate static secret from bytes
         let secret = StaticSecret::from(self.secret_bytes);
         let shared_secret = secret.diffie_hellman(&their_public_key);
 
-        // Hash the shared secret to derive a uniform 32-byte key
         let mut hasher = Sha256::new();
         hasher.update(shared_secret.as_bytes());
         let result = hasher.finalize();
@@ -98,7 +94,6 @@ impl EphemeralKeyPair {
         let their_public_key = X25519PublicKey::from(*their_public);
         let shared_secret = self.secret.diffie_hellman(&their_public_key);
 
-        // Hash the shared secret to derive a uniform 32-byte key
         let mut hasher = Sha256::new();
         hasher.update(shared_secret.as_bytes());
         let result = hasher.finalize();

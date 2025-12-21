@@ -24,7 +24,6 @@ use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -32,7 +31,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Parse command-line configuration
     let config = RelayConfig::parse();
 
     info!("Starting relay node");
@@ -41,21 +39,17 @@ async fn main() -> Result<()> {
     info!("  Directory URL: {}", config.directory_url);
     info!("  Bandwidth: {} bytes/sec", config.bandwidth);
 
-    // Generate keypair for this relay node
     let keypair = KeyPair::generate();
     info!(
         "  Public key: {:02x?}...",
         &keypair.public_key().bytes[0..8]
     );
 
-    // Get bind address
     let bind_addr = config.bind_addr()?;
 
-    // Generate unique node ID
     let node_id = Uuid::new_v4().to_string();
     info!("  Node ID: {}", node_id);
 
-    // Create node descriptor
     let descriptor = NodeDescriptor {
         node_id: node_id.clone(),
         node_type: config.node_type,
@@ -65,20 +59,15 @@ async fn main() -> Result<()> {
         exit_policy: config.exit_policy(),
     };
 
-    // Create HTTP client for directory communication
     let http_client = Client::new();
 
-    // Register with directory service
     register_with_directory(&http_client, &config.directory_url, &descriptor).await?;
 
-    // Create circuit registry (local state for circuits passing through this node)
     let circuit_registry = Arc::new(Mutex::new(CircuitRegistry::new()));
 
-    // Start TCP listener
     let listener = TcpListener::bind(bind_addr).await?;
     info!("Listening on {}", bind_addr);
 
-    // Spawn heartbeat task
     let heartbeat_handle = tokio::spawn(heartbeat_loop(
         http_client.clone(),
         config.directory_url.clone(),
@@ -86,7 +75,6 @@ async fn main() -> Result<()> {
         config.heartbeat_interval,
     ));
 
-    // Spawn connection handler task
     let connection_handle = tokio::spawn(accept_connections(
         listener,
         circuit_registry,
@@ -94,7 +82,6 @@ async fn main() -> Result<()> {
         config.node_type,
     ));
 
-    // Wait for shutdown signal
     info!("Relay node started successfully. Press Ctrl+C to stop.");
 
     tokio::select! {
@@ -109,7 +96,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Cleanup: unregister from directory
     info!("Unregistering from directory service...");
     if let Err(e) = unregister_from_directory(&http_client, &config.directory_url, &node_id).await {
         warn!("Failed to unregister: {}", e);
@@ -136,10 +122,7 @@ async fn register_with_directory(
         Ok(())
     } else {
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "unknown".to_string());
+        let body = response.text().await.unwrap_or_else(|_| "unknown".to_string());
         Err(anyhow::anyhow!(
             "Failed to register with directory: {} - {}",
             status,
@@ -163,10 +146,7 @@ async fn unregister_from_directory(
         Ok(())
     } else {
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "unknown".to_string());
+        let body = response.text().await.unwrap_or_else(|_| "unknown".to_string());
         Err(anyhow::anyhow!(
             "Failed to unregister from directory: {} - {}",
             status,
@@ -215,7 +195,6 @@ async fn accept_connections(
             Ok((stream, addr)) => {
                 info!("Accepted connection from {}", addr);
 
-                // Spawn a task to handle this connection
                 let registry = circuit_registry.clone();
                 let kp = keypair.clone();
                 tokio::spawn(handle_connection(stream, addr, registry, kp, node_type));
@@ -237,14 +216,12 @@ async fn handle_connection(
 ) {
     info!("Handling connection from {}", addr);
 
-    // Wrap stream in Arc<Mutex> for sharing with background tasks
     let stream_arc = Arc::new(Mutex::new(stream));
 
     loop {
-        // Read message from stream
         let mut stream_guard = stream_arc.lock().await;
         let msg_result = Message::from_stream(&mut *stream_guard).await;
-        drop(stream_guard); // Release lock before processing
+        drop(stream_guard);
 
         match msg_result {
             Ok(Some(msg)) => {
@@ -255,10 +232,8 @@ async fn handle_connection(
                 let circuit_id = msg.circuit_id;
                 let command = msg.command;
 
-                // Handle message based on type
                 match command {
                     common::protocol::MessageCommand::Create => {
-                        // Create handler based on node type
                         let mut handler = match node_type {
                             common::NodeType::Entry => CircuitHandler::Entry(
                                 EntryCircuitHandler::new(circuit_id, keypair.clone()),
@@ -271,10 +246,8 @@ async fn handle_connection(
                             ),
                         };
 
-                        // Handle CREATE message
                         match handler.handle_message(msg, Some(stream_arc.clone())).await {
                             Ok(Some(response)) => {
-                                // Send CREATED response
                                 let bytes = response.to_bytes();
                                 let mut stream = stream_arc.lock().await;
                                 if let Err(e) = stream.write_all(&bytes).await {
@@ -284,7 +257,6 @@ async fn handle_connection(
                                 drop(stream);
                                 info!("Sent CREATED response for circuit {}", circuit_id);
 
-                                // Add circuit to registry
                                 let mut registry = circuit_registry.lock().await;
                                 registry.add_circuit(circuit_id, handler);
                             }
@@ -296,7 +268,6 @@ async fn handle_connection(
                         }
                     }
                     _ => {
-                        // Route to existing circuit
                         let mut registry = circuit_registry.lock().await;
 
                         let should_spawn_reader = matches!(
@@ -307,7 +278,6 @@ async fn handle_connection(
 
                         match registry.handle_message(msg, Some(stream_arc.clone())).await {
                             Ok(Some(response)) => {
-                                // Send response
                                 let bytes = response.to_bytes();
                                 let mut stream = stream_arc.lock().await;
                                 if let Err(e) = stream.write_all(&bytes).await {
@@ -327,8 +297,6 @@ async fn handle_connection(
                                 {
                                     info!("Spawned background reader for circuit {}", circuit_id);
 
-                                    // Optionally track the task handle for cleanup
-                                    // For now, we just let it run until completion
                                     tokio::spawn(async move {
                                         if let Err(e) = task_handle.await {
                                             error!("Background reader task failed: {}", e);
@@ -337,9 +305,6 @@ async fn handle_connection(
                                 }
                             }
                             Ok(None) => {
-                                // No response to send
-
-                                // Still might need to spawn background reader for EXTEND
                                 if should_spawn_reader
                                     && let Some(handler) = registry.get_circuit_mut(circuit_id)
                                     && let Some(task_handle) = handler.spawn_nexthop_reader(
@@ -367,7 +332,6 @@ async fn handle_connection(
                 }
             }
             Ok(None) => {
-                // Connection closed
                 info!("Connection from {} closed", addr);
                 break;
             }

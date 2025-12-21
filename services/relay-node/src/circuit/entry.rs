@@ -36,7 +36,6 @@ impl EntryCircuitHandler {
             self.context.circuit_id
         );
 
-        // Extract client's public key from message payload
         if msg.data.len() < 32 {
             return Err(anyhow::anyhow!("CREATE message too short"));
         }
@@ -50,19 +49,15 @@ impl EntryCircuitHandler {
 
         debug!("Entry: Client public key: {:02x?}...", &client_public[0..8]);
 
-        // Perform DH key exchange
         let shared_secret = self.keypair.diffie_hellman(&client_public);
         debug!("Entry: Shared secret derived");
 
-        // Derive session key
         let session_key = derive_session_key(&shared_secret);
 
-        // Activate circuit with session key
         self.context.activate(session_key.clone());
 
         info!("Entry: Circuit {} activated", self.context.circuit_id);
 
-        // Send CREATED response with our public key
         let response = Message::created(
             self.context.circuit_id,
             self.keypair.public_key().bytes.to_vec(),
@@ -78,7 +73,6 @@ impl EntryCircuitHandler {
             self.context.circuit_id
         );
 
-        // Decrypt the EXTEND payload (client encrypted it for us)
         let session_key = self
             .context
             .session_key
@@ -87,14 +81,10 @@ impl EntryCircuitHandler {
 
         let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
 
-        // Parse next hop address from decrypted data
-        // Format: [next_hop_address (variable)] [next_hop_public_key (32 bytes)]
         if decrypted.len() < 32 {
             return Err(anyhow::anyhow!("EXTEND payload too short"));
         }
 
-        // For simplicity, assume address is "ip:port" string followed by public key
-        // In production, use proper encoding
         let addr_end = decrypted
             .iter()
             .position(|&b| b == 0)
@@ -107,26 +97,21 @@ impl EntryCircuitHandler {
 
         info!("Entry: Extending to next hop: {}", addr_str);
 
-        // Connect to next hop
         let mut next_hop_stream = TcpStream::connect(addr_str).await?;
 
         info!("Entry: Connected to next hop {}", addr_str);
 
-        // Extract the next hop's public key and client's onion-encrypted data
-        // The remaining data after the address contains the CREATE payload for next hop
-        let create_payload_start = addr_end + 1; // Skip null terminator
+        let create_payload_start = addr_end + 1;
         let create_payload = decrypted
             .get(create_payload_start..)
             .ok_or(anyhow::anyhow!("Missing CREATE payload for next hop"))?;
 
-        // Forward CREATE message to next hop
         let create_msg = Message::create(self.context.circuit_id, create_payload.to_vec());
 
         let create_bytes = create_msg.to_bytes();
         next_hop_stream.write_all(&create_bytes).await?;
         debug!("Entry: Sent CREATE to next hop");
 
-        // Wait for CREATED response from next hop
         let created_msg = Message::from_stream(&mut next_hop_stream)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Next hop closed connection waiting for CREATED"))?;
@@ -140,16 +125,10 @@ impl EntryCircuitHandler {
 
         info!("Entry: Received CREATED from next hop");
 
-        // Store the next hop connection
         self.next_hop = Some(NextHop::new(next_hop_stream));
 
-        // Send EXTENDED response to client with next hop's CREATED data
-        let response = Message::extended(
-            self.context.circuit_id,
-            created_msg.data, // Include next hop's public key
-        );
+        let response = Message::extended(self.context.circuit_id, created_msg.data);
 
-        // Encrypt response for client
         let encrypted_data = aes_encrypt(&response.data, &session_key.backward);
         let encrypted_response = Message::extended(self.context.circuit_id, encrypted_data);
 
@@ -169,10 +148,8 @@ impl EntryCircuitHandler {
             .as_ref()
             .ok_or(anyhow::anyhow!("Circuit not yet established"))?;
 
-        // Decrypt one layer (forward direction: client -> entry -> middle)
         let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
 
-        // Forward to next hop if it exists
         if let Some(next_hop) = &mut self.next_hop {
             let forward_msg = Message::new(msg.circuit_id, msg.stream_id, msg.command, decrypted);
 
@@ -180,8 +157,6 @@ impl EntryCircuitHandler {
             next_hop.write.write_all(&serialized).await?;
 
             debug!("Entry: Forwarded {} bytes to next hop", serialized.len());
-
-            // Response from next hop is handled by spawn_nexthop_reader background task
         } else {
             error!(
                 "Entry: No next hop configured for circuit {}",
@@ -189,7 +164,7 @@ impl EntryCircuitHandler {
             );
         }
 
-        Ok(None) // No immediate response to client
+        Ok(None)
     }
 
     /// Handle backward relay cell (data coming back from middle/exit node)
@@ -200,14 +175,12 @@ impl EntryCircuitHandler {
             self.context.circuit_id
         );
 
-        // Get session key
         let session_key = self
             .context
             .session_key
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No session key established"))?;
 
-        // Encrypt one layer for backward direction (middle -> entry -> client)
         let encrypted = aes_encrypt(&msg.data, &session_key.backward);
 
         Ok(Some(Message::new(
@@ -270,7 +243,6 @@ impl EntryCircuitHandler {
     ) -> Option<tokio::task::JoinHandle<()>> {
         let circuit_id = self.context.circuit_id;
 
-        // Take the read half from next_hop
         let mut read_half = self.next_hop.as_mut()?.take_read()?;
 
         info!(
